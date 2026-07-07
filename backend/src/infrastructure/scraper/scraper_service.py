@@ -16,15 +16,22 @@ class ScraperService:
         """
         soup = BeautifulSoup(html_content, "html.parser")
         
-        # 1. Extract Images (look for img tags with common page/reader classes or inside reader div)
+        # 1. Extract Images (look inside common reader containers or all img tags)
         image_urls = []
-        for img in soup.find_all("img"):
-            src = img.get("data-src") or img.get("src")
+        reader_container = soup.find("div", class_=["reading-content", "container-chapter-reader", "page-break", "vung-doc", "reader-area", "chapter-c"]) or soup
+        
+        for img in reader_container.find_all("img"):
+            src = img.get("data-src") or img.get("data-lazy-src") or img.get("data-original") or img.get("src")
             if not src:
                 continue
             src = src.strip()
-            # Filter out tiny icons or logos if possible, check common image extensions or reader structure
-            if any(ext in src.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]) or "page-img" in img.get("class", []):
+            lower_src = src.lower()
+            
+            # Filter out UI elements, logos, avatars, ads, banners
+            if any(ignore in lower_src for ignore in ["logo", "avatar", "icon", "flag", "banner", "discord", "facebook", "gravatar", "ad-", "sponsored"]):
+                continue
+                
+            if any(ext in lower_src for ext in [".jpg", ".jpeg", ".png", ".webp", ".avif"]) or any(cls in str(img.get("class", [])).lower() for cls in ["page", "chapter", "wp-manga-chapter-img"]):
                 full_url = urljoin(base_url, src)
                 if full_url not in image_urls:
                     image_urls.append(full_url)
@@ -53,7 +60,21 @@ class ScraperService:
         """
         Fetches HTML from source URL, downloads image bytes, and prepares structured chapter payload.
         """
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": source_url,
+            "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1"
+        }
+        async with httpx.AsyncClient(headers=headers, timeout=self.timeout, follow_redirects=True) as client:
             resp = await client.get(source_url)
             resp.raise_for_status()
             

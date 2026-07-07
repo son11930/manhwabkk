@@ -45,8 +45,8 @@ export const SubmitJob: React.FC = () => {
       const jobId = json.data.id;
       setJobStatus(json.data);
 
-      // Start simulated progress if backend worker is running asynchronously
-      simulateProgress(jobId, sourceUrl);
+      // Poll real backend worker progress
+      pollJobProgress(jobId, sourceUrl);
     } catch (err: any) {
       // For demonstration if API offline, simulate realistic progress
       const mockId = "mock-job-" + Date.now();
@@ -60,6 +60,31 @@ export const SubmitJob: React.FC = () => {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const pollJobProgress = (id: string, url: string) => {
+    const { manga_slug, chapter_number } = parseUrlToSlugAndChapter(url);
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`http://localhost:8000/api/v1/jobs/${id}`);
+        if (res.ok) {
+          const json = await res.json();
+          const data = json.data;
+          if (data) {
+            setJobStatus({
+              ...data,
+              manga_slug: data.manga_slug || manga_slug,
+              chapter_number: data.chapter_number || chapter_number
+            });
+            if (data.status === 'COMPLETED' || data.status === 'FAILED') {
+              clearInterval(interval);
+            }
+          }
+        }
+      } catch {
+        // Ignore network errors during polling
+      }
+    }, 2000);
   };
 
   const parseUrlToSlugAndChapter = (url: string) => {

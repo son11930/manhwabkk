@@ -24,6 +24,7 @@ export const Reader: React.FC = () => {
   const { seriesSlug, chapterNum } = useParams<{ seriesSlug: string; chapterNum: string }>();
   const [chapter, setChapter] = useState<ChapterData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [seriesChapters, setSeriesChapters] = useState<string[]>([]);
 
   // Fallback mock data for demonstration
   const fallbackChapter: ChapterData = {
@@ -44,12 +45,24 @@ export const Reader: React.FC = () => {
 
   useEffect(() => {
     window.scrollTo(0, 0);
-    const fetchChapter = async () => {
+    const fetchChapterAndSeries = async () => {
       setLoading(true);
       try {
-        const res = await fetch(`http://localhost:8000/api/v1/series/${seriesSlug}/chapters/${chapterNum}`);
-        if (res.ok) {
-          const json = await res.json();
+        const [resCh, resSe] = await Promise.all([
+          fetch(`http://localhost:8000/api/v1/series/${seriesSlug}/chapters/${chapterNum}`),
+          fetch(`http://localhost:8000/api/v1/series/${seriesSlug}`)
+        ]);
+
+        if (resSe.ok) {
+          const jsonSe = await resSe.json();
+          if (jsonSe.data && jsonSe.data.chapters) {
+            const chNums = jsonSe.data.chapters.map((c: any) => c.chapter_number).reverse();
+            if (chNums.length > 0) setSeriesChapters(chNums);
+          }
+        }
+
+        if (resCh.ok) {
+          const json = await resCh.json();
           if (json.data) {
             setChapter(json.data);
           } else {
@@ -64,7 +77,7 @@ export const Reader: React.FC = () => {
         setLoading(false);
       }
     };
-    fetchChapter();
+    fetchChapterAndSeries();
   }, [seriesSlug, chapterNum]);
 
   if (loading) {
@@ -79,6 +92,21 @@ export const Reader: React.FC = () => {
   }
 
   const currentChapter = chapter || fallbackChapter;
+
+  const getDynamicChapterList = () => {
+    if (seriesChapters.length > 0) {
+      if (!seriesChapters.includes(currentChapter.chapter_number)) {
+        return [currentChapter.chapter_number, ...seriesChapters];
+      }
+      return seriesChapters;
+    }
+    const currentNum = parseInt(currentChapter.chapter_number.replace(/[^0-9]/g, '')) || 1;
+    const list: string[] = [];
+    for (let i = Math.max(1, currentNum + 2); i >= Math.max(1, currentNum - 5); i--) {
+      list.push(`chapter-${i}`);
+    }
+    return list;
+  };
 
   return (
     <div className="min-h-screen bg-dark-900 pb-24">
@@ -191,7 +219,7 @@ export const Reader: React.FC = () => {
               <span>สารบัญตอนทั้งหมด</span>
             </h3>
             <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {["chapter-1", "chapter-2", "chapter-3", "chapter-4", "chapter-5"].map((ch) => (
+              {getDynamicChapterList().map((ch) => (
                 <Link
                   key={ch}
                   to={`/read/${seriesSlug}/${ch}`}
@@ -201,7 +229,7 @@ export const Reader: React.FC = () => {
                       : 'text-gray-400 hover:text-white hover:bg-white/5'
                   }`}
                 >
-                  {ch.toUpperCase()} : ตอนล่าสุด
+                  {ch.toUpperCase()} : {ch === currentChapter.chapter_number ? 'ตอนปัจจุบัน' : 'อ่านแปลไทย'}
                 </Link>
               ))}
             </div>
