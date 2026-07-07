@@ -204,10 +204,17 @@ export const SubmitJob: React.FC = () => {
                 <span className="text-xs text-gray-400 font-medium">✨ ลิงก์ทดสอบระบบที่รองรับ AI:</span>
                 <button
                   type="button"
+                  onClick={() => setSourceUrl("https://www.mangaread.org/manga/spare-me-great-lord/chapter-151/")}
+                  className="px-2.5 py-1 rounded-lg bg-green-500/10 hover:bg-green-500/20 border border-green-500/30 text-xs text-green-400 font-bold transition-all shadow-sm"
+                >
+                  📖 MangaRead (Spare Me, Great Lord!)
+                </button>
+                <button
+                  type="button"
                   onClick={() => setSourceUrl("https://asuracomic.net/comics/infinite-mage-a80d257e/chapter/176")}
                   className="px-2.5 py-1 rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700/60 text-xs text-accent-cyan font-semibold transition-all"
                 >
-                  🔥 Asura Scans (Infinite Mage)
+                  🔥 Asura Scans
                 </button>
                 <button
                   type="button"
