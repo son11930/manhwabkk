@@ -1,15 +1,14 @@
-﻿@echo off
-chcp 65001 > nul
+@echo off
 title MANHWA.THAI - 1-Click Updater
 
 echo ===============================================================================
-echo MANHWA.THAI - ระบบอัปเดตโค้ดอัตโนมัติ (1-Click Git Updater)
+echo MANHWA.THAI - Automated System Updater (1-Click Git Updater)
 echo ===============================================================================
 
 echo [1/3] Pulling latest code from GitHub (git pull)...
 git pull
 if %ERRORLEVEL% neq 0 (
-    echo [ERROR] เกิดข้อผิดพลาดในการดึงโค้ดจาก Git!
+    echo [ERROR] Failed to pull code from Git repository!
     pause
     exit /b 1
 )
@@ -27,7 +26,7 @@ call npm run build
 
 echo.
 echo ===============================================================================
-echo [SUCCESS] อัปเดตระบบเสร็จสมบูรณ์ 100%%! คุณสามารถคลิกเปิด start_app.bat เพื่อใช้งานได้ทันทีครับ
+echo [SUCCESS] Update completed 100%%! You can now run start_app.bat to start.
 echo ===============================================================================
 
 pause
