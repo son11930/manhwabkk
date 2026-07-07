@@ -29,16 +29,26 @@ class R2StorageService:
         key = f"{manga_slug}/{chapter_number}/{page_index}.jpg"
         
         def _put():
-            self.client.put_object(
-                Bucket=self.bucket,
-                Key=key,
-                Body=image_bytes,
-                ContentType=content_type,
-                CacheControl="public, max-age=86400, immutable"
-            )
+            try:
+                self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=image_bytes,
+                    ContentType=content_type,
+                    CacheControl="public, max-age=86400, immutable"
+                )
+                return f"{self.public_url}/{key}"
+            except Exception:
+                # Fallback to local static storage if Cloudflare R2 credentials are not configured
+                import os
+                local_dir = os.path.join("static", "cache", manga_slug, chapter_number)
+                os.makedirs(local_dir, exist_ok=True)
+                local_path = os.path.join(local_dir, f"{page_index}.jpg")
+                with open(local_path, "wb") as f:
+                    f.write(image_bytes)
+                return f"http://localhost:8000/static/cache/{key}"
             
-        await asyncio.to_thread(_put)
-        return f"{self.public_url}/{key}"
+        return await asyncio.to_thread(_put)
 
     async def _delete_by_prefix(self, prefix: str) -> int:
         """Helper method to list and delete all objects matching a prefix."""

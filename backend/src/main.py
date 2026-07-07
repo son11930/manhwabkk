@@ -53,6 +53,11 @@ app.include_router(auth_router, prefix=settings.API_V1_STR)
 app.include_router(manga_router, prefix=settings.API_V1_STR)
 app.include_router(jobs_router, prefix=settings.API_V1_STR)
 
+import os
+from fastapi.staticfiles import StaticFiles
+os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "app": settings.APP_NAME, "env": settings.APP_ENV}
