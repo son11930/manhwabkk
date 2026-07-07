@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-dark-900 text-gray-100 font-sans antialiased selection:bg-accent-cyan selection:text-dark-900;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-dark-800/80 backdrop-blur-md border border-gray-700/50 shadow-xl;
+  }
+  
+  .glass-card {
+    @apply bg-gradient-to-br from-dark-800/90 to-dark-900/90 backdrop-blur-lg border border-white/10 hover:border-accent-cyan/50 transition-all duration-300 shadow-lg hover:shadow-accent-cyan/10;
+  }
+  
+  .glow-text {
+    @apply text-transparent bg-clip-text bg-gradient-to-r from-accent-cyan via-blue-400 to-accent-purple font-extrabold;
+  }
+
+  .glow-btn {
+    @apply relative inline-flex items-center justify-center px-6 py-3 font-bold text-white transition-all duration-300 bg-gradient-to-r from-accent-blue via-accent-purple to-accent-pink rounded-xl shadow-lg hover:shadow-accent-purple/50 hover:scale-[1.02] active:scale-95;
+  }
+}
+
+/* Custom Scrollbar for sleek Webtoon reading */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0b0c10;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a3644;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #45a29e;
+}

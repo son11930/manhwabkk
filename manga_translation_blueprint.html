@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>Manga/Manhua AI Translation Web Blueprint</title>
+<style>
+    @page {
+        size: A4;
+        margin: 15mm 12mm;
+        background-color: #f4f6f9;
+    }
+    body {
+        font-family: 'Helvetica Neue', Arial, sans-serif;
+        color: #2c3e50;
+        margin: 0;
+        padding: 0;
+        line-height: 1.5;
+        font-size: 10pt;
+    }
+    .header-banner {
+        background: linear-gradient(135deg, #1e293b, #334155);
+        color: #ffffff;
+        margin: -15mm -12mm 20px -12mm;
+        padding: 30px 12mm;
+    }
+    h1 {
+        font-size: 20pt;
+        margin: 0 0 5px 0;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+    }
+    .subtitle {
+        font-size: 11pt;
+        color: #94a3b8;
+        margin: 0;
+    }
+    h2 {
+        font-size: 13pt;
+        color: #0f172a;
+        border-left: 4px solid #3b82f6;
+        padding-left: 8px;
+        margin-top: 25px;
+        margin-bottom: 12px;
+        page-break-after: avoid;
+    }
+    h3 {
+        font-size: 11pt;
+        color: #1e293b;
+        margin-top: 15px;
+        margin-bottom: 8px;
+        page-break-after: avoid;
+    }
+    p {
+        margin: 0 0 10px 0;
+        text-align: justify;
+    }
+    ul, ol {
+        margin: 0 0 15px 0;
+        padding-left: 20px;
+    }
+    li {
+        margin-bottom: 5px;
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 15px 0;
+        background-color: #ffffff;
+    }
+    th, td {
+        border: 1px solid #e2e8f0;
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+    }
+    th {
+        background-color: #f1f5f9;
+        color: #0f172a;
+        font-weight: bold;
+    }
+    .code-block {
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-left: 3px solid #64748b;
+        padding: 10px;
+        font-family: monospace;
+        font-size: 9pt;
+        white-space: pre-wrap;
+        margin: 10px 0;
+    }
+    .highlight-box {
+        background-color: #eff6ff;
+        border: 1px solid #bfdbfe;
+        padding: 12px;
+        margin: 15px 0;
+        page-break-inside: avoid;
+    }
+    .tech-tag {
+        display: inline-block;
+        background-color: #e2e8f0;
+        color: #334155;
+        padding: 2px 6px;
+        font-size: 8.5pt;
+        font-weight: bold;
+        margin-right: 4px;
+        margin-bottom: 4px;
+    }
+</style>
+</head>
+<body>
+
+<div class="header-banner">
+    <h1>พิมพ์เขียวแผนงาน: ระบบเว็บแปลมังฮวาออโต้ด้วย AI</h1>
+    <p class="subtitle">สถาปัตยกรรมระบบสำหรับพัฒนาบนเครื่อง Local Environment (MVP Prototype)</p>
+</div>
+
+<p>เอกสารฉบับนี้จัดทำขึ้นเป็นคู่มือและแผนการทำงาน (System Prompt / Blueprint) สำหรับให้ <strong>Antigravity 2.0</strong> นำไปใช้ออกแบบ เขียนโค้ด และรันระบบสร้างเว็บแปลมังฮวา (Manga/Manhua) จากภาษาอังกฤษเป็นภาษาไทยโดยอัตโนมัติ โดยเน้นโครงสร้างที่เสถียร ประหยัดค่าใช้จ่าย และสเกลขึ้นสู่ระบบจริงได้ง่าย</p>
+
+<h2>1. สรุปภาพรวมระบบและเป้าหมาย (Project Scope)</h2>
+<ul>
+    <li><strong>วัตถุประสงค์:</strong> สร้างเว็บแอปพลิเคชันที่ดึงภาพมังฮวาจากเว็บนอก (ภาษาอังกฤษ) นำมาลบตัวอักษรดิบ แปลเป็นไทยด้วย AI ที่เกลาสำนวนเหมือนคนแปลจริง และจัดเก็บลง Cloud Storage เพื่อให้เปิดอ่านบนหน้าเว็บตัวเองได้โดยตรง</li>
+    <li><strong>หลักการทำงานคลังข้อมูล:</strong> "คนแรกสั่งแปล คนต่อไปอ่านฟรี" เมื่อมีคนส่งลิงก์เข้าระบบ ภาพจะถูกแปลและบันทึกถาวร คนถัดไปที่เข้ามาอ่านตอนเดียวกันจะดึงจากคลังรูปทันที ไม่เกิดค่าใช้จ่าย AI ซ้ำ</li>
+    <li><strong>การทำงานบนเครื่อง Local:</strong> ทุกระบบ (Frontend, Backend, Scraper) จะรันบนคอมพิวเตอร์ส่วนบุคคลในปัจจุบัน แต่เชื่อมต่อคลังรูปภาพและโมเดลแปลภาษาผ่าน Cloud API จริง</li>
+</ul>
+
+<h2>2. เทคโนโลยีที่เลือกใช้ (Tech Stack)</h2>
+<div style="margin-bottom: 15px;">
+    <span class="tech-tag">Backend: Node.js (Express) หรือ Python (FastAPI)</span>
+    <span class="tech-tag">Storage: Cloudflare R2 (S3-Compatible)</span>
+    <span class="tech-tag">Translation Brain: Groq API (Llama 3 / Mixtral)</span>
+    <span class="tech-tag">Database: SQLite หรือ Supabase Local</span>
+    <span class="tech-tag">Scraping: Extension Ecosystem (Tachiyomi/Mihon style)</span>
+</div>
+
+<h2>3. แผนการดำเนินงานแบ่งตามโมดูล (Module Breakdown)</h2>
+
+<h3>โมดูลที่ 1: ระบบขูดข้อมูลดิบและปุ่มนำทาง (Scraper & Core Crawler)</h3>
+<ul>
+    <li>รันสคริปต์ Headless Browser หรือใช้โครงสร้าง Extension สำเร็จรูปดึงข้อมูลรูปภาพและลิงก์ปุ่ม "Next Chapter" จากเว็บต้นทางตาม URL ที่ได้รับ</li>
+    <li>ระบบหลังบ้านต้องทำงานแบบไดนามิก รองรับโครงสร้างเว็บที่หลากหลายโดยไม่พังง่าย</li>
+</ul>
+
+<h3>โมดูลที่ 2: Manga OCR, Inpainting & AI Translation Pipeline</h3>
+<ol>
+    <li><strong>Text Detection (OCR):</strong> ตรวจจับตำแหน่งและแกะข้อความภาษาอังกฤษออกจากกล่องคำพูด (Speech Bubbles)</li>
+    <li><strong>Inpainting:</strong> ลบตัวอักษรภาษาอังกฤษเดิมออก พร้อมถมสีพื้นหลังกล่องคำพูดให้เนียนเรียบ</li>
+    <li><strong>Groq AI Translation:</strong> ส่งข้อความอังกฤษไปแปลงผ่าน Groq API พร้อมฝัง Prompt เกลาสำนวน เช่น:
+        <div class="code-block">"Translate this English manga dialogue into natural, engaging Thai. Adapt slang and context to fit a Thai webtoon reader style. Return ONLY the translated Thai text."</div>
+    </li>
+    <li><strong>Typesetting:</strong> นำข้อความภาษาไทยเรนเดอร์กลับลงไปในตำแหน่งพิกัดเดิมด้วย Font สไตล์มังฮวาไทย</li>
+</ol>
+
+<h3>โมดูลที่ 3: คลังจัดเก็บข้อมูลและการควบคุม Cache (Storage & Browser Cache)</h3>
+<ul>
+    <li><strong>Cloudflare R2 Bucket:</strong> สมัครและเปิดใช้งาน Public Development URL (R2.dev Subdomain) เพื่อรับลิงก์นำภาพไปแสดงผลบนเว็บเครื่อง Local</li>
+    <li><strong>โครงสร้างโฟลเดอร์:</strong> เก็บไฟล์เป็นระบบระเบียบเพื่อการเรียกใชและลบออกได้ง่าย:
+        <div class="code-block">manga-thai-storage / [manga-slug] / [chapter-number] / [page-index].jpg</div>
+    </li>
+    <li><strong>Browser Cache Config:</strong> ทุกครั้งที่อัปโหลดไฟล์เสร็จสิ้น ระบบหลังบ้านต้องฝัง Header คำสั่งควบคุมแคชบนบราวเซอร์ขนาด 1 วัน เพื่อเซฟพื้นที่คอมพิวเตอร์คนอ่านและเซฟโควตา R2 Class B:
+        <div class="code-block">CacheControl: 'public, max-age=86400, immutable'</div>
+    </li>
+</ul>
+
+<h3>โมดูลที่ 4: หน้าจอเว็บและระบบสิทธิ์ควบคุม (Frontend & Admin Panel)</h3>
+<ul>
+    <li><strong>หน้าสำหรับคนอ่าน (Reader View):</strong> หน้าเว็บแสดงผลรูปภาพต่อกันเป็นแนวดิ่งสไตล์ Webtoon มีปุ่มเปลี่ยนตอนกด Next / Previous บทถัดไปดึงออโต้</li>
+    <li><strong>หน้าควบคุม (Admin Panel):</strong> ประกอบด้วยระบบล็อกอินด้วย Email & Password ของระบบ (Super Admin)
+        <ul>
+            <li>ฟังก์ชันสำหรับแอดมินหรือผู้ใช้ทั่วไป: วางลิงก์เพื่อสั่งรันระบบแปลภาษาออโต้</li>
+            <li>สิทธิ์ขาดเฉพาะ Super Admin: สิทธิ์ในการกด "ลบตอน" หรือ "ลบเรื่อง" ออกจากฐานข้อมูลและ Cloudflare R2 โดยสิทธิ์นี้จะบล็อกไม่ให้ยูสเซอร์ทั่วไปเข้าถึง</li>
+        </ul>
+    </li>
+</ul>
+
+<h2>4. ลำดับขั้นตอนการพัฒนา (Execution Stepsสำหรับ Antigravity 2.0)</h2>
+<table>
+    <tr>
+        <th style="width: 20%;">ขั้นตอน</th>
+        <th style="width: 40%;">สิ่งที่ต้องทำ</th>
+        <th style="width: 40%;">ผลลัพธ์ที่คาดหวัง</th>
+    </tr>
+    <tr>
+        <td><strong>เฟสที่ 1</strong><br>Environment Setup</td>
+        <td>1. ตั้งโครงสร้างโปรเจกต์รันบนเครื่องคอมตัวเอง<br>2. ผูกฐานข้อมูล SQLite ในเครื่องสำหรับตารางผู้ใช้และคลังเรื่อง<br>3. เชื่อมต่อ AWS SDK สำหรับดึง/ส่งไฟล์เข้า R2 ผ่าน API Token</td>
+        <td>ระบบหลังบ้านเชื่อมต่อ Cloudflare R2 คลังเก็บรูปภาพได้สำเร็จ</td>
+    </tr>
+    <tr>
+        <td><strong>เฟสที่ 2</strong><br>Translation Core</td>
+        <td>1. พัฒนาระบบบอทดึงรูปดิบอังกฤษ<br>2. วาง Flow การแกะภาพ -> ลบคำ -> ยิงส่ง Groq API แปลไทย -> แปะคำไทย<br>3. ทดสอบอัปโหลดรูปสำเร็จเข้า R2 พร้อมพ่วงแท็ก Cache 1 วัน (max-age=86400)</td>
+        <td>ได้ไฟล์รูปภาพมังฮวาซับไทยจัดเก็บใน R2 พร้อมเปิดลิงก์อ่านได้จริง</td>
+    </tr>
+    <tr>
+        <td><strong>เฟสที่ 3</strong><br>Web UI & Admin</td>
+        <td>1. สร้างหน้าเว็บคนอ่านการ์ตูน โหลดภาพจาก R2 ลื่นๆ<br>2. ทำระบบล็อกอิน แอดมิน พาเนล สำหรับจัดการเพิ่ม/ลบ ตอน<br>3. จำกัดสิทธิ์ปุ่ม Delete ให้กดได้เฉพาะผู้ถือรหัสผ่านตัวระบบเท่านั้น</td>
+        <td>แอปพลิเคชันเวอร์ชันต้นแบบ (MVP) ทำงานบนเครื่องเครื่อง Local สมบูรณ์แบบ</td>
+    </tr>
+</table>
+
+<div class="highlight-box">
+    <strong>คำสั่งสำหรับ Antigravity 2.0:</strong> จงใช้แผนงานสถาปัตยกรรมชิ้นนี้ในการสร้างระบบแปลมังฮวาออโต้ โดยเริ่มจากการเซ็ตค่าเชื่อมต่อระบบเก็บภาพ Cloudflare R2 เข้ากับโปรเจกต์หลังบ้านบนคอมพิวเตอร์เครื่องนี้เป็นลำดับแรกสุด
+</div>
+
+</body>
+</html>
