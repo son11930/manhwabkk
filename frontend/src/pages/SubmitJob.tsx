@@ -200,6 +200,23 @@ export const SubmitJob: React.FC = () => {
                   <span>{error}</span>
                 </p>
               )}
+              <div className="flex flex-wrap items-center gap-2 pt-2">
+                <span className="text-xs text-gray-400 font-medium">✨ ลิงก์ทดสอบระบบที่รองรับ AI:</span>
+                <button
+                  type="button"
+                  onClick={() => setSourceUrl("https://asuracomic.net/comics/infinite-mage-a80d257e/chapter/176")}
+                  className="px-2.5 py-1 rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700/60 text-xs text-accent-cyan font-semibold transition-all"
+                >
+                  🔥 Asura Scans (Infinite Mage)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSourceUrl("https://flamecomics.xyz/series/1/3efdb83fccbc577a")}
+                  className="px-2.5 py-1 rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700/60 text-xs text-accent-purple font-semibold transition-all"
+                >
+                  ⚡ Flame Comics
+                </button>
+              </div>
             </div>
 
             <button
@@ -267,6 +284,28 @@ export const SubmitJob: React.FC = () => {
                     <span>อ่านตอนที่แปลเสร็จนี้</span>
                     <ArrowRight className="w-4 h-4" />
                   </button>
+                </div>
+              )}
+
+              {/* Honest Failed State Reporting */}
+              {jobStatus.status === 'FAILED' && (
+                <div className="p-5 rounded-2xl bg-red-500/10 border border-red-500/30 space-y-3 animate-fade-in">
+                  <div className="flex items-start space-x-3">
+                    <span className="text-xl">⚠️</span>
+                    <div>
+                      <h4 className="text-sm font-bold text-red-400">ระบบไม่สามารถดึงภาพจากลิงก์นี้ได้จริง</h4>
+                      <p className="text-xs text-gray-300 mt-1">
+                        <span className="font-semibold text-white">สาเหตุจากเซิร์ฟเวอร์:</span> {jobStatus.error_message || 'เว็บไซต์ต้นทางมีระบบป้องกันบอท (Cloudflare Protection) หรือไม่พบไฟล์รูปภาพมังฮวาในลิงก์'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="pt-3 border-t border-red-500/20 text-xs text-gray-300 space-y-1">
+                    <p className="font-bold text-white">💡 คำแนะนำเพื่อให้อ่านได้จริง 100%:</p>
+                    <ul className="list-disc list-inside space-y-1 text-gray-400 pl-1">
+                      <li>เว็บไซต์ที่ติดระบบป้องกันบอท Cloudflare เข้มงวด ระบบจะไม่ลักไก่ใช้ภาพอื่นมาแทนครับ เพราะเราต้องการให้คุณได้อ่านมังฮวาเรื่องที่เลือกจริงๆ</li>
+                      <li>กรุณาลองเลือกใช้ลิงก์จากเว็บไซต์ที่รองรับระบบ AI เช่น <span className="text-green-400 font-bold">asuracomic.net</span> หรือ <span className="text-green-400 font-bold">flamecomics.xyz</span> โดยสามารถกดที่ปุ่มแนะนำด้านบนเพื่อทดสอบได้ทันทีครับ</li>
+                    </ul>
+                  </div>
                 </div>
               )}
             </div>
