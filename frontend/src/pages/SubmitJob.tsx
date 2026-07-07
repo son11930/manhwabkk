@@ -62,8 +62,32 @@ export const SubmitJob: React.FC = () => {
     }
   };
 
+  const parseUrlToSlugAndChapter = (url: string) => {
+    try {
+      const cleanUrl = url.replace(/\/$/, '');
+      const parts = cleanUrl.split('/');
+      let chapter_number = "chapter-1";
+      let manga_slug = "manga-series";
+
+      if (parts.length >= 2) {
+        const lastPart = parts[parts.length - 1];
+        const prevPart = parts[parts.length - 2];
+        if (lastPart.toLowerCase().includes('chap') || lastPart.toLowerCase().includes('ch') || !isNaN(Number(lastPart))) {
+          chapter_number = lastPart.startsWith('chap') ? lastPart : `chapter-${lastPart}`;
+          manga_slug = prevPart;
+        } else {
+          manga_slug = lastPart;
+        }
+      }
+      return { manga_slug, chapter_number };
+    } catch {
+      return { manga_slug: "manga-series", chapter_number: "chapter-1" };
+    }
+  };
+
   const simulateProgress = (id: string, url: string) => {
     let progress = 0;
+    const { manga_slug, chapter_number } = parseUrlToSlugAndChapter(url);
     const interval = setInterval(() => {
       progress += Math.floor(Math.random() * 15) + 10;
       if (progress >= 100) {
@@ -72,8 +96,8 @@ export const SubmitJob: React.FC = () => {
         setJobStatus({
           id,
           source_url: url,
-          manga_slug: "solo-leveling",
-          chapter_number: "chapter-1",
+          manga_slug,
+          chapter_number,
           status: 'COMPLETED',
           progress_percent: 100
         });
@@ -82,6 +106,8 @@ export const SubmitJob: React.FC = () => {
         setJobStatus({
           id,
           source_url: url,
+          manga_slug,
+          chapter_number,
           status: status as any,
           progress_percent: progress
         });
@@ -207,7 +233,10 @@ export const SubmitJob: React.FC = () => {
                     </div>
                   </div>
                   <button
-                    onClick={() => navigate(`/read/${jobStatus.manga_slug || 'solo-leveling'}/${jobStatus.chapter_number || 'chapter-1'}`)}
+                    onClick={() => {
+                      const parsed = parseUrlToSlugAndChapter(jobStatus.source_url || '');
+                      navigate(`/read/${jobStatus.manga_slug || parsed.manga_slug}/${jobStatus.chapter_number || parsed.chapter_number}`);
+                    }}
                     className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-green-500 hover:bg-green-600 text-dark-900 font-black text-xs flex items-center justify-center space-x-1 shadow-lg transition-all"
                   >
                     <span>อ่านตอนที่แปลเสร็จนี้</span>

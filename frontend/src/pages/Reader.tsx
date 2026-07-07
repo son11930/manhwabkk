@@ -27,13 +27,13 @@ export const Reader: React.FC = () => {
 
   // Fallback mock data for demonstration
   const fallbackChapter: ChapterData = {
-    id: "mock-ch-1",
-    series_id: "mock-series",
+    id: `mock-${seriesSlug}-${chapterNum}`,
+    series_id: seriesSlug || "mock-series",
     chapter_number: chapterNum || "chapter-1",
-    title_th: `ตอนที่ ${chapterNum || "1"} : การตื่นขึ้นของฮันเตอร์ระดับ S`,
+    title_th: `ตอนที่ ${chapterNum?.replace(/[^0-9]/g, '') || "1"} : แปลไทยฉบับ AI Vision (${seriesSlug?.replace(/-/g, ' ').toUpperCase() || 'MANHWA'})`,
     source_url: "https://example.com",
-    next_chapter_url: "/read/solo-leveling/chapter-2",
-    prev_chapter_url: "/read/solo-leveling/chapter-0",
+    next_chapter_url: `/read/${seriesSlug || 'manga'}/chapter-${(Number(chapterNum?.replace(/[^0-9]/g, '') || 1) + 1)}`,
+    prev_chapter_url: `/read/${seriesSlug || 'manga'}/chapter-${Math.max(1, (Number(chapterNum?.replace(/[^0-9]/g, '') || 1) - 1))}`,
     pages: [
       { id: "p1", page_index: 1, image_url: "https://images.unsplash.com/photo-1578632767115-351597cf2477?q=80&w=800&auto=format&fit=crop" },
       { id: "p2", page_index: 2, image_url: "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?q=80&w=800&auto=format&fit=crop" },
