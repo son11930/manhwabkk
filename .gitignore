@@ -75,3 +75,16 @@ backend/manga_app.db
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+
+# AI Assistant & IDE Customization Metadata
+.agents/
+.gemini/
+agents/
+commands/
+rules/
+skills/
+hooks/
+mcp-configs/
+AGENTS.md
+/scripts/
+/tests/
