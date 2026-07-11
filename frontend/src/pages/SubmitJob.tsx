@@ -8,13 +8,19 @@ interface JobStatus {
   source_url: string;
   manga_slug?: string;
   chapter_number?: string;
-  status: 'PENDING' | 'SCRAPING' | 'TRANSLATING' | 'COMPLETED' | 'FAILED';
+  status: 'PENDING' | 'SCRAPING' | 'TRANSLATING' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'SHADOW_COMPLETED' | 'FAILED';
   progress_percent: number;
   error_message?: string;
+  translation_provider?: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_estimate_usd?: number;
+  actual_model?: string;
 }
 
 export const SubmitJob: React.FC = () => {
   const [sourceUrl, setSourceUrl] = useState('');
+  const [translationProvider, setTranslationProvider] = useState('groq');
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +48,7 @@ export const SubmitJob: React.FC = () => {
       const res = await fetch('/api/v1/jobs/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_url: sourceUrl })
+        body: JSON.stringify({ source_url: sourceUrl, translation_provider: translationProvider })
       });
 
       if (!res.ok) {
@@ -246,6 +252,23 @@ export const SubmitJob: React.FC = () => {
               </div>
             </div>
 
+            <div>
+              <label className="block text-sm font-bold text-gray-200 mb-2">
+                เลือกระบบแปลภาษา AI (Translation Provider & Model)
+              </label>
+              <select
+                value={translationProvider}
+                onChange={(e) => setTranslationProvider(e.target.value)}
+                disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(jobStatus.status))}
+                className="w-full px-4 py-3.5 rounded-2xl bg-dark-900/80 border border-gray-700 text-white focus:outline-none focus:border-accent-cyan focus:ring-2 focus:ring-accent-cyan/20 transition-all text-sm sm:text-base font-medium"
+              >
+                <option value="groq">⚡ Groq Fast & Compound Router (ฟรี / ความเร็วสูง)</option>
+                <option value="deepseek-v4-flash">🚀 DeepSeek V4 Flash (ประหยัด / แปลพร้อมกัน 5 หน้า)</option>
+                <option value="deepseek-v4-pro">🧠 DeepSeek V4 Pro (ฉลาดสูงสุด / แปลพร้อมกัน 5 หน้า)</option>
+                <option value="deepseek-chat">💬 DeepSeek V3 Chat (สมดุล / แปลพร้อมกัน 5 หน้า)</option>
+              </select>
+            </div>
+
             <button
               type="submit"
               disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(jobStatus.status))}
@@ -291,6 +314,19 @@ export const SubmitJob: React.FC = () => {
                   ></div>
                 </div>
               </div>
+
+              {(jobStatus.input_tokens || jobStatus.cost_estimate_usd) && (
+                <div className="p-3.5 rounded-xl bg-dark-900/80 border border-gray-700/60 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-gray-400">โมเดลและระบบแปล:</span>
+                    <span className="font-bold text-accent-cyan">{jobStatus.actual_model || jobStatus.translation_provider || 'Groq'}</span>
+                  </div>
+                  <div className="flex items-center space-x-4 font-mono">
+                    <span className="text-gray-300">Tokens: {((jobStatus.input_tokens || 0) + (jobStatus.output_tokens || 0)).toLocaleString()}</span>
+                    <span className="text-green-400 font-bold">Cost: ${Number(jobStatus.cost_estimate_usd || 0).toFixed(5)} USD</span>
+                  </div>
+                </div>
+              )}
 
               {/* Completion Action */}
               {['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED'].includes(jobStatus.status) && (

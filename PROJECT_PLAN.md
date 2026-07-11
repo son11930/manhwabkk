@@ -877,5 +877,21 @@ gantt
 - [x] **3. เพิ่ม regression ทั้งสองความหมาย:**
   - ครอบคลุมคำแปล `จุด/จังหวะที่เหมาะสม` และ `แต้ม/คะแนน` เพื่อป้องกัน false positive
 
+### Phase 6.26: Provider Selection & DeepSeek V4 Translation Plan (5-Page Batching & Authoritative Multi-Provider Lane)
+- [ ] **1. Configuration & Database Schema Extension:**
+  - เพิ่มการตั้งค่า `DEEPSEEK_API_KEY`, `DEEPSEEK_API_BASE_URL`, และพารามิเตอร์จำกัดกลุ่มหน้า `DEEPSEEK_BATCH_PAGES=5`, `DEEPSEEK_MAX_BATCH_SEGMENTS=80`, `DEEPSEEK_MAX_BATCH_INPUT_CHARS=120000` ลงใน `config.py`
+  - เพิ่มฟิลด์ `translation_provider`, `requested_model`, `actual_model`, `input_tokens`, `output_tokens`, และ `cost_estimate_usd` ในตาราง `TranslationJob`
+- [ ] **2. DeepSeek Client & Translator Protocol Abstraction:**
+  - สร้าง `DeepSeekClient` ใน `backend/src/infrastructure/ai/deepseek_client.py` เพื่อเชื่อมต่อ `deepseek-chat` (Flash) และ `deepseek-reasoner` (Pro)
+  - กำหนด Protocol ร่วม `ChatCompletionClient` ใน `AITranslatorEngine` โดยคงระบบ Prompt, Locked Glossary, Rolling Context และ Quality Gate ให้เหมือนกันในทุกผู้ให้บริการ
+  - แยกการทำงานอย่างเด็ดขาด (Authoritative Provider Isolation) ไม่ให้ DeepSeek สลับไปใช้ Groq หรือ Groq สลับไปใช้ DeepSeek
+- [ ] **3. Five-Page Batch Scheduler in Worker Pipeline:**
+  - จัดกลุ่มหน้าต่อเนื่องสูงสุด 5 หน้าตาม `reading_order` เมื่อใช้ DeepSeek เพื่อควบคุมโทเค็น ความแม่นยำ และประหยัดค่าใช้จ่าย
+  - คำนวณการใช้ `input_tokens` และ `output_tokens` พร้อมประมาณการค่าใช้จ่ายจริงของแต่ละงาน
+- [ ] **4. Frontend Provider Selection UI:**
+  - เพิ่มตัวเลือก Radio Group ในหน้า `SubmitJob.tsx` สำหรับเลือก Groq (Free/Default), DeepSeek V4 Flash (5-Page Batching), และ DeepSeek V4 Pro
+  - แสดง Cost Warning และ Provider-Neutral Status Badges ตามรุ่นโมเดลที่เลือก
+
 ---
 *แผนงานฉบับนี้จัดทำขึ้นโดยยึดมั่นในหลักการ Everything Claude Code (ECC) และ blueprint ของโครงการ เพื่อเป็นแกนหลักในการปฏิบัติงานในทุกเฟสถัดไป*
+

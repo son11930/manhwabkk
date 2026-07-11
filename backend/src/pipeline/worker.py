@@ -23,6 +23,8 @@ from src.pipeline.inpainter import InpainterEngine
 from src.pipeline.ocr import MangaOCREngine
 from src.pipeline.quality import TranslationQualityGate
 from src.pipeline.translator import AITranslatorEngine, TranslationResponseError
+from src.infrastructure.ai.factory import get_ai_client
+from src.pipeline.deepseek_batch_translator import DeepSeekBatchTranslator, group_pages_for_batching
 from src.pipeline.typesetter import TypesetterEngine
 
 
@@ -170,7 +172,13 @@ class TranslationPipelineWorker:
         if artifacts:
             await self.artifact_repo.append_many(artifacts)
 
-    async def process_job(self, job_id: str, *, publish: bool = True) -> TranslationJob:
+    async def process_job(
+        self,
+        job_id: str,
+        *,
+        publish: bool = True,
+        ai_client: Optional[Any] = None,
+    ) -> TranslationJob:
         job = await self.job_repo.find_by_id(job_id)
         if not job:
             raise ValueError(f"Job {job_id} not found.")
@@ -234,52 +242,92 @@ class TranslationPipelineWorker:
             all_results: list[TranslationResult] = []
             all_segments: dict[str, OCRSegment] = {}
             warnings = False
+            provider = getattr(job, "translation_provider", "groq") or "groq"
+            deepseek_translations: dict[str, str] = {}
+            total_in_tokens = 0
+            total_out_tokens = 0
+            total_cost_usd = 0.0
+            actual_model = ""
+
+            if provider in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
+                client = ai_client or get_ai_client(provider)
+                batch_translator = DeepSeekBatchTranslator(client=client, provider=provider)
+                ordered_page_segs = [segments_by_page[page["index"]] for page in pages_data]
+                batches = group_pages_for_batching(ordered_page_segs)
+                for page_batch in batches:
+                    batch_res = await batch_translator.translate_page_batch(
+                        page_batch,
+                        glossary=tuple(glossary),
+                        genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                    )
+                    deepseek_translations.update(batch_res.translations)
+                    total_in_tokens += batch_res.input_tokens
+                    total_out_tokens += batch_res.output_tokens
+                    total_cost_usd += batch_res.cost_usd
+                    actual_model = batch_res.model
+
             for completed_pages, page in enumerate(pages_data, start=1):
                 page_segments = segments_by_page[page["index"]]
                 all_segments.update({segment.segment_id: segment for segment in page_segments})
                 approved: list[dict[str, object]] = []
                 page_results: list[TranslationResult] = []
-                missing_segs = list(page_segments)
 
-                if missing_segs:
-                    request = TranslationBatchRequest(
-                        segments=tuple(missing_segs),
-                        profile=profile,
-                        glossary=tuple(glossary),
-                        context=tuple(rolling_context[-8:]),
-                    )
-                    try:
-                        missing_res = await self.translator.translate_batch(request)
-                        if isinstance(missing_res, Sequence):
-                            page_results.extend(r for r in missing_res if isinstance(r, TranslationResult))
-                    except Exception as batch_error:
-                        logger.warning(
-                            f"[Worker] translate_batch failed for missing segments on page {page['index']}: {batch_error}. Falling back..."
+                if provider in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
+                    for seg in page_segments:
+                        translated_text = deepseek_translations.get(seg.segment_id, seg.source_text)
+                        page_results.append(
+                            TranslationResult(
+                                segment_id=seg.segment_id,
+                                source_text=seg.source_text,
+                                draft_thai=translated_text,
+                                final_thai=translated_text,
+                                model=actual_model or "deepseek-chat",
+                                attempts=1,
+                                qc_status="APPROVED" if translated_text != seg.source_text else "NEEDS_REVIEW",
+                                issue_codes=() if translated_text != seg.source_text else ("EMPTY_TRANSLATION",),
+                            )
                         )
+                else:
+                    missing_segs = list(page_segments)
+                    if missing_segs:
+                        request = TranslationBatchRequest(
+                            segments=tuple(missing_segs),
+                            profile=profile,
+                            glossary=tuple(glossary),
+                            context=tuple(rolling_context[-8:]),
+                        )
+                        try:
+                            missing_res = await self.translator.translate_batch(request)
+                            if isinstance(missing_res, Sequence):
+                                page_results.extend(r for r in missing_res if isinstance(r, TranslationResult))
+                        except Exception as batch_error:
+                            logger.warning(
+                                f"[Worker] translate_batch failed for missing segments on page {page['index']}: {batch_error}. Falling back..."
+                            )
 
-                if len(page_results) < len(page_segments):
-                    legacy_results = list(page_results)
-                    existing_ids = {r.segment_id for r in page_results}
-                    for segment in page_segments:
-                        if segment.segment_id in existing_ids:
-                            continue
-                        translated = await self.translator.translate_text(
-                            segment.source_text,
-                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                        )
-                        if not translated or translated == segment.source_text:
-                            warnings = True
-                        legacy_results.append(TranslationResult(
-                            segment_id=segment.segment_id,
-                            source_text=segment.source_text,
-                            draft_thai=translated or segment.source_text,
-                            final_thai=translated or segment.source_text,
-                            model="fallback",
-                            attempts=1,
-                            qc_status="APPROVED" if translated else "NEEDS_REVIEW",
-                            issue_codes=() if translated else ("EMPTY_TRANSLATION",),
-                        ))
-                    page_results = tuple(legacy_results)
+                    if len(page_results) < len(page_segments):
+                        legacy_results = list(page_results)
+                        existing_ids = {r.segment_id for r in page_results}
+                        for segment in page_segments:
+                            if segment.segment_id in existing_ids:
+                                continue
+                            translated = await self.translator.translate_text(
+                                segment.source_text,
+                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                            )
+                            if not translated or translated == segment.source_text:
+                                warnings = True
+                            legacy_results.append(TranslationResult(
+                                segment_id=segment.segment_id,
+                                source_text=segment.source_text,
+                                draft_thai=translated or segment.source_text,
+                                final_thai=translated or segment.source_text,
+                                model="fallback",
+                                attempts=1,
+                                qc_status="APPROVED" if translated else "NEEDS_REVIEW",
+                                issue_codes=() if translated else ("EMPTY_TRANSLATION",),
+                            ))
+                        page_results = tuple(legacy_results)
                 result_map = {
                     result.segment_id: result
                     for result in page_results
@@ -409,6 +457,10 @@ class TranslationPipelineWorker:
                     "status": "SHADOW_COMPLETED",
                     "progress_percent": 100,
                     "error_message": None,
+                    "input_tokens": total_in_tokens,
+                    "output_tokens": total_out_tokens,
+                    "cost_estimate_usd": total_cost_usd,
+                    "actual_model": actual_model or None,
                 })
             await self.page_repo.replace_for_chapter(chapter, staged_pages, is_translated=True)
             final_status = "COMPLETED_WITH_WARNINGS" if warnings else "COMPLETED"
@@ -417,6 +469,10 @@ class TranslationPipelineWorker:
                 "status": final_status,
                 "progress_percent": 100,
                 "error_message": None,
+                "input_tokens": total_in_tokens,
+                "output_tokens": total_out_tokens,
+                "cost_estimate_usd": total_cost_usd,
+                "actual_model": actual_model or None,
             })
         except Exception as error:
             logger.exception("[Worker] Job %s FAILED with error: %s", job_id, error)

@@ -4,6 +4,7 @@ import re
 from typing import Mapping, Optional
 
 from src.infrastructure.ai.groq_client import CompletionResult, GroqClient
+from src.infrastructure.ai.deepseek_client import DeepSeekClient
 from src.pipeline.contracts import TranslationBatchRequest, TranslationResult
 
 
@@ -523,7 +524,7 @@ class AITranslatorEngine:
         result = None
         translated = {}
         for attempt in range(2):
-            if isinstance(self.client, GroqClient):
+            if isinstance(self.client, (GroqClient, DeepSeekClient)):
                 completion = await self.client.generate_chat_completion_result(
                     messages=messages, temperature=0.15, max_tokens=1800
                 )

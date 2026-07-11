@@ -3,6 +3,18 @@
 All notable changes to the **Manga/Manhua AI Translation Web Application** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) and [Everything Claude Code (ECC)](https://github.com/everything-claude-code) principles.
 
+## [1.3.13-DeepSeekV4TranslationPlan] - 2026-07-12
+
+### Added
+- Implemented multi-provider AI selection supporting 4 models: `groq` (default), `deepseek-v4-flash`, `deepseek-v4-pro`, and `deepseek-chat`.
+- Isolated DeepSeek settings (`DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, budget caps, and model configurations) without interfering with existing Groq rate limit / fallback logic.
+- Added database schema & API schema tracking for `translation_provider`, `input_tokens`, `output_tokens`, `cost_estimate_usd`, and `actual_model`.
+- Built `DeepSeekClient` with automated provider-to-model mapping (`deepseek-v4-flash` -> `deepseek-chat`, `deepseek-v4-pro` -> `deepseek-reasoner`), retry backoff, and usage token parsing.
+- Implemented `get_ai_client` factory to dynamically instantiate AI clients.
+- Implemented `DeepSeekBatchTranslator` to translate up to 5 consecutive pages simultaneously (`max_segments=80`, `max_chars=120k`), with exact USD cost calculation.
+- Integrated `DeepSeekBatchTranslator` into `TranslationPipelineWorker`, passing translations through `TranslationQualityGate` and updating job record usage statistics.
+- Updated Frontend UI (`SubmitJob.tsx`) with a Provider & Model selector dropdown and an interactive usage & cost breakdown badge upon job progress/completion.
+
 ## [1.3.12-ContextSensitiveSweetPointReview] - 2026-07-11
 
 ### Fixed

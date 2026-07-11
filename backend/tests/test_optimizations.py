@@ -46,7 +46,7 @@ async def test_groq_client_records_429_in_circuit_breaker():
         # First call returns 429, second (backup) returns 200
         mock_resp_429 = MagicMock()
         mock_resp_429.status_code = 429
-        mock_resp_429.headers = {"Retry-After": "60.0"}
+        mock_resp_429.headers = {"Retry-After": "65.0"}
         
         mock_resp_200 = MagicMock()
         mock_resp_200.status_code = 200

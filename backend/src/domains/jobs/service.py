@@ -11,8 +11,10 @@ class JobService:
         self.repo = JobRepository(session)
 
     async def submit_job(self, req: JobSubmitReq) -> TranslationJob:
+        provider_val = req.translation_provider.value if hasattr(req.translation_provider, "value") else str(req.translation_provider)
         return await self.repo.create({
             "source_url": req.source_url,
+            "translation_provider": provider_val,
             "status": "PENDING",
             "progress_percent": 0
         })

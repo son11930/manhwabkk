@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = Field(default="test_groq_api_key")
     GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile")
 
+    # DeepSeek API (Independent configuration from Groq)
+    DEEPSEEK_API_KEY: str = Field(default="")
+    DEEPSEEK_API_BASE_URL: str = Field(default="https://api.deepseek.com/chat/completions")
+    DEEPSEEK_BATCH_PAGES: int = Field(default=5)
+    DEEPSEEK_MAX_BATCH_SEGMENTS: int = Field(default=80)
+    DEEPSEEK_MAX_BATCH_INPUT_CHARS: int = Field(default=120000)
+    DEEPSEEK_TIMEOUT_SECONDS: int = Field(default=90)
+    DEEPSEEK_MAX_RETRIES: int = Field(default=2)
+
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,
         env_file_encoding="utf-8",

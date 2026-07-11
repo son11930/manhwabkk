@@ -54,6 +54,9 @@ class CompletionResult:
     text: str
     model: str
     attempts: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 class GroqClient:
     """
@@ -180,12 +183,16 @@ class GroqClient:
                                     break
                                 response.raise_for_status()
                                 data = response.json()
-                                actual_tokens = int(data.get("usage", {}).get("total_tokens", 1600))
+                                usage_data = data.get("usage", {})
+                                actual_tokens = int(usage_data.get("total_tokens", 1600))
                                 _record_tpm_usage(current_model, actual_tokens)
                                 return CompletionResult(
                                     text=data["choices"][0]["message"]["content"].strip(),
                                     model=current_model,
                                     attempts=attempt_count,
+                                    prompt_tokens=int(usage_data.get("prompt_tokens", 0)),
+                                    completion_tokens=int(usage_data.get("completion_tokens", 0)),
+                                    total_tokens=int(usage_data.get("total_tokens", 0)),
                                 )
                         except (httpx.RequestError, httpx.HTTPStatusError) as e:
                             if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in [400, 404]:
