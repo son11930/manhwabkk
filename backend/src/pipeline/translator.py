@@ -1,33 +1,554 @@
-from typing import Optional
-from src.infrastructure.ai.groq_client import GroqClient
+import asyncio
+import json
+import re
+from typing import Mapping, Optional
+
+from src.infrastructure.ai.groq_client import CompletionResult, GroqClient
+from src.pipeline.contracts import TranslationBatchRequest, TranslationResult
+
+
+class TranslationResponseError(ValueError):
+    """Raised when a model response cannot map exactly to the requested segments."""
+
+
+def parse_translation_response(
+    response_text: str,
+    expected_segment_ids: tuple[str, ...],
+    allow_partial: bool = False,
+) -> dict[str, str]:
+    """Strictly parse the JSON response without dropping multiline dialogue."""
+    cleaned_response = re.sub(r"<think>.*?</think>", "", response_text or "", flags=re.DOTALL | re.IGNORECASE).strip()
+    if cleaned_response.startswith("```") and cleaned_response.endswith("```"):
+        fenced_lines = cleaned_response.splitlines()
+        cleaned_response = "\n".join(fenced_lines[1:-1]).strip()
+    try:
+        payload = json.loads(cleaned_response)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise TranslationResponseError("translation response must be complete JSON") from error
+    entries = payload.get("translations") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise TranslationResponseError("translation response requires a translations list")
+
+    parsed: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            if allow_partial:
+                continue
+            raise TranslationResponseError("translation item must be an object")
+        segment_id = entry.get("segment_id", entry.get("id"))
+        text = entry.get("text", entry.get("th", entry.get("target")))
+        if not isinstance(segment_id, str) or not isinstance(text, str) or not text.strip():
+            if allow_partial:
+                continue
+            raise TranslationResponseError("translation items require non-empty segment_id and text")
+        if segment_id in parsed and not allow_partial:
+            raise TranslationResponseError("translation response contains duplicate segment IDs")
+        parsed[segment_id] = text.strip()
+
+    if set(parsed) != set(expected_segment_ids) or len(parsed) != len(expected_segment_ids):
+        if allow_partial and len(parsed) > 0:
+            return {sid: parsed[sid] for sid in expected_segment_ids if sid in parsed}
+        raise TranslationResponseError("translation response does not map one-to-one with segments")
+    return {segment_id: parsed[segment_id] for segment_id in expected_segment_ids}
+
+def get_genre_context_instructions(genre: str = "modern_cultivation") -> str:
+    """
+    Returns specific pronoun and stylistic instructions based on manga genre.
+    """
+    genre_map = {
+        "modern_cultivation": (
+            "🎯 [แนว: มังฮวาผู้ฝึกตนยุคปัจจุบัน]\n"
+            "- สรรพนาม: ฉัน, นาย, แก, เธอ, พี่ชาย, น้องสาว, ท่านผู้ฝึกตน (ห้ามใช้ 'คุณ' พร่ำเพรื่อ)\n"
+            "- ศัพท์เฉพาะ: ผู้ฝึกตน, ตระกูลใหญ่ (ห้ามแปลว่าครอบครัว), ผู้ใช้พลังธาตุน้ำ (ห้ามแปลว่าประเภทน้ำ), แต้มอารมณ์ด้านลบ, พลังวิญญาณ, ทะลวงขั้น, ค่ายกล, ระดับ E, เครือข่ายสวรรค์ (Dragnet)\n"
+            "- สำนวน: พูดตรงไปตรงมา กวน มันส์ สไตล์การ์ตูนวัยรุ่น ห้ามมีคำเวียดนามหลุด"
+        ),
+        "wuxia": (
+            "🎯 [แนว: ยุทธภพ กำลังภายใน]\n"
+            "- สรรพนาม: ข้า, เจ้า, ท่าน, อาวุโส, ศิษย์พี่, ขอรับ\n"
+            "- สำนวน: ขึงขัง คมคาย สไตล์ยุทธภพ"
+        ),
+        "modern_action": (
+            "🎯 [แนว: แอคชั่น ดันเจี้ยน ฮันเตอร์]\n"
+            "- สรรพนาม: ฉัน, นาย, แก, พวกเรา, บอส\n"
+            "- ศัพท์: แรงก์ S, ระดับ A, ดันเจี้ยน\n"
+            "- สำนวน: ดุดัน สะใจ สไตล์การ์ตูนแอคชั่น"
+        ),
+        "romance_drama": (
+            "🎯 [แนว: โรแมนติก ดราม่า]\n"
+            "- สรรพนาม: เธอ, ฉัน, พี่, น้อง, รุ่นพี่\n"
+            "- สำนวน: เน้นอารมณ์ความรู้สึก นุ่มนวล"
+        )
+    }
+    key = genre.lower() if genre else "modern_cultivation"
+    if "cultiv" in key or "เซียน" in key or "ผู้ฝึก" in key:
+        return genre_map["modern_cultivation"]
+    return genre_map.get(key, genre_map["modern_cultivation"])
+
+VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
+    "คุณคือนักแปลมังฮวา (Veteran Scanlator) มืออาชีพ หน้าที่คือแปลบทสนทนาการ์ตูนให้เป็นภาษาพูดไทยที่ลื่นไหล คมคาย สไตล์มังฮวาและตรงความหมายที่สุด\n"
+    "กฎเหล็กสำคัญ:\n"
+    "1. ห้ามใช้คำสรรพนามทางการเช่น 'คุณ' พร่ำเพรื่อเด็ดขาด! ให้ใช้คำว่า 'นาย', 'เธอ', 'แก', 'ท่าน', หรือเรียกชื่อตัวละครแทน\n"
+    "2. ห้ามทิ้งคำศัพท์ภาษาอังกฤษไว้เด็ดขาด! แปลข้อความอังกฤษ/จีนให้เป็นภาษาไทยที่สมบูรณ์ 100%\n"
+    "3. แปลให้ครบถ้วนทุกประโยคและตรงความหมายตามต้นฉบับจริง ห้ามย่อ ห้ามสรุป ห้ามตัดทอนข้อความ และห้ามแปลมั่วหรือแต่งชื่อลัทธิ/องค์กรขึ้นเองเด็ดขาด (เช่น ถ้าต้นฉบับพูดระดับ D ต้องแปลระดับ D ห้ามเปลี่ยนเป็นระดับ E)\n"
+    "4. ห้ามแปลตรงตัวแบบคำต่อคำหรือทางการเกินไปจนเหมือนข่าวราชการเด็ดขาด! ต้องแปลตามบริบทภาษาพูดธรรมชาติของคนไทยในมังฮวา เช่น:\n"
+    "   - คำว่า rob / steal / robbery ให้เลือกใช้คำพูดธรรมชาติเช่น 'ปล้น', 'ขโมย', หรือ 'ไถเงิน' ตามบริบทจริง ห้ามใช้คำทางการเกินไปเช่น 'โจรกรรม'\n"
+    "   - สำนวน 'have trouble collecting money / hard to collect money' ให้แปลว่า 'ทวงเงินยาก / เก็บค่าคุ้มครองยาก / ไถเงินยาก' (ห้ามแปลทื่อๆ ว่า 'มีปัญหาในการเก็บเงิน')\n"
+    "   - คำว่า 'sweet point / sweet points' ให้แปลตามบริบทจริงของเรื่อง (ห้าม fix คำตายตัว): หากหมายถึงตำแหน่งหรือจังหวะ ให้แปลว่า 'จุดที่เหมาะสม / จุดที่ลงตัว / จังหวะที่พอดี' แต่หากเป็นบริบทคะแนนหรือหยอกล้อ ให้แปลว่า 'มอบคะแนนแสนหวาน / คะแนนดีๆ / แต้มความหวาน' และ 'Isn't this what teams are for?' ให้แปลว่า 'ทีมมีไว้ทำไมล่ะถ้าไม่ใช่แบบนี้? / นี่แหละประโยชน์ของการอยู่ทีมเดียวกันไม่ใช่เรอะ?'\n"
+    "5. คำศัพท์ Cultivator/Cultivation ในมังฮวาให้แปลว่า 'ผู้ฝึกตน' เสมอ (ห้ามแปลว่า 'เกษตรกร') และการเลื่อนระดับ Rank/Level ให้แปลว่า 'เลื่อนระดับ/ทะลวงขั้น' (ห้ามแปลว่า 'เลื่อนตำแหน่ง')\n"
+    "6. บังคับเว้นวรรคประโยคภาษาไทยให้เป็นธรรมชาติ: เว้นวรรคหลังชื่อตัวละคร และเว้นวรรคคั่นระหว่างประโยคย่อย ห้ามเขียนติดกันเป็นพรืด และห้ามใส่เครื่องหมายจุด (.) ปิดท้ายประโยคภาษาไทยเด็ดขาด!\n"
+    "7. ห้ามมี <think> ห้ามเกริ่นนำ ห้ามอธิบาย ตอบเฉพาะคำแปลตามหมายเลข [1]... เท่านั้น\n"
+    "8. คำศัพท์ Family/Families/Great Families/Clan ในแนวมังฮวาผู้ฝึกตน ให้แปลว่า 'ตระกูล' หรือ 'ตระกูลใหญ่' เสมอ (ห้ามแปลว่า 'ครอบครัว' หรือ 'ครอบครัวใหญ่')\n"
+    "9. คำศัพท์บอกธาตุ/สายพลัง เช่น Water-type / Fire-type ให้แปลว่า 'ผู้ใช้พลังธาตุน้ำ / ผู้ฝึกตนธาตุน้ำ / สายธาตุน้ำ' (ห้ามแปลแปลกๆ ว่า 'ฉันเป็นธาตุน้ำ' หรือ 'ฉันเป็นประเภทน้ำ' เด็ดขาด ถ้าต้นฉบับคือ I am a water-type ให้แปลเป็น 'ฉันเป็นผู้ใช้พลังธาตุน้ำ') และข้อความแจ้งเตือนระบบ เช่น NEGATIVE EMOTION VALUE ให้แปลว่า 'แต้มอารมณ์ด้านลบ / ได้รับแต้มอารมณ์ด้านลบ'\n"
+    "10. ห้ามมีคำภาษาเวียดนาม (เช่น nên) หรืออักขระสี่เหลี่ยมแปลกๆ หลุดมาในผลลัพธ์เด็ดขาด ให้ใช้ภาษาไทยพูดธรรมชาติแบบนักแปลมืออาชีพ\n"
+    "11. ระดับ/คลาส/แรงค์ (Rank/Level/Class) ให้ใช้ตัวอักษรอังกฤษพิมพ์ใหญ่เสมอ เช่น 'ระดับ A', 'ระดับ B', 'ระดับ E', 'คลาส S' (ห้ามเขียนสะกดคำอ่านเป็นภาษาไทยว่า 'ระดับเอ', 'ระดับบี', 'ระดับอี', 'คลาสเอส')\n"
+    "12. คำศัพท์ Cultivator/Unaffiliated/Independent: 'Unaffiliated Cultivator' / 'Independent Cultivator' / 'Rogue Cultivator' / '散修' ให้แปลว่า 'ผู้ฝึกตนไร้สังกัด' เสมอ (ห้ามแปลตกคำว่า 'ไร้' เป็น 'ผู้ฝึกตนที่สังกัด')\n"
+    "13. คำศัพท์องค์กร: 'Dragnet' / 'Drangnet' / 'Heavenly Network' ให้แปลว่า 'เครือข่ายสวรรค์' เสมอ (ห้ามแปลทับศัพท์เป็น 'ดรังเนต')\n"
+    "14. แปลให้อารมณ์เข้ากับตัวละคร เช่น 'Am I only a D-level?' หรือ 'Could I be a D-class?' ให้แปลว่า 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?' (ห้ามแปลซื่อทื่อว่า 'อืม.. ฉันจะเป็นระดับ D หรือไง?')\n"
+    "ตัวอย่างมาตรฐานแนวทางการแปล:\n"
+    "Q: Oh this is my sister Lu Xiaoyu, she will follow me to the ruins too\n"
+    "A: โอ้นี่น้องสาวฉันลู่เสี่ยวอวี๋ เธอจะตามฉันไปที่ซากปรักหักพังด้วย\n"
+    "Q: Lu Shu is only Level E, how could he enter the ruins?\n"
+    "A: ลู่ซู แค่ระดับ E เขาจะเข้าไปในซากปรักหักพังได้ไง\n"
+    "Q: I will go harvest benefits than waiting for ruins to open that is boring\n"
+    "A: ฉันจะไปหาผลประโยชน์ดีกว่า มัวแต่รอซากปรักหักพังเปิดมันน่าเบื่อ\n"
+    "Q: You are too stingy Li Yixiao, you have to put yourself in the same boat as everyone\n"
+    "A: นายงกมากๆ เลย หลี่อี้เซี่ยว นายต้องยัดตัวเองเข้าไปในเรือลำเดียวกันกับทุกๆ คน"
+    "\n❌ AI ทื่อ: ฉันจะทำเอง\n✅ คนแปลอาชีพ: ก็แกรั้นจะให้ฉันทำเองนี่นา\n"
+    "Q: You are making a fool of yourself\nA: กำลังโชว์โง่อยู่หรือไง\n"
+)
+
+COMPACT_PER_SEGMENT_SYSTEM_PROMPT = (
+    "คุณคือนักแปลมังฮวามืออาชีพ แปลบทสนทนาต่อไปนี้เป็นภาษาพูดไทยที่ลื่นไหล เป็นธรรมชาติ สไตล์การ์ตูน\n"
+    "กฎสำคัญ:\n"
+    "1. ห้ามใช้คำว่า 'คุณ' ให้ใช้ ฉัน, นาย, แก, เธอ, หรือท่าน\n"
+    "2. ห้ามทับศัพท์อังกฤษ แปลไทยให้ครบถ้วน 100% ห้ามแปลตรงตัวแบบคำต่อคำ\n"
+    "3. คำศัพท์มังฮวา: Cultivator/Cultivation = 'ผู้ฝึกตน', Water-type = 'ผู้ใช้พลังธาตุน้ำ', Family/Clan = 'ตระกูล'\n"
+    "4. ตอบเฉพาะคำแปลภาษาไทยเท่านั้น ห้ามมีคำเกริ่นนำหรือคำอธิบายใดๆ"
+)
 
 class AITranslatorEngine:
     """
     AI Translator Engine powered by Groq API (Llama-3 / Mixtral).
-    Uses specialized prompt engineering for natural Thai manga/manhua translation.
+    Uses specialized prompt engineering for expressive, natural Thai manga/manhua translation.
     """
     def __init__(self, client: Optional[GroqClient] = None):
         self.client = client or GroqClient()
-        self.system_prompt = (
-            "คุณคือนักแปลการ์ตูนมังฮวาและมังฮัวจากภาษาอังกฤษเป็นภาษาไทยระดับมืออาชีพ "
-            "สำนวนของคุณสนุก ดุดัน เข้ากับบริบทแฟนตาซี แอคชั่น หรือโรแมนติก "
-            "แปลให้เหมือนคนแปลจริงๆ ไม่ใช่โปรแกรมแปลภาษา และห้ามมีคำอธิบายเพิ่มเติมใดๆ นอกเหนือจากข้อความที่แปลแล้ว"
-        )
+        self.system_prompt = VETERAN_TRANSLATOR_SYSTEM_PROMPT
 
-    async def translate_text(self, text: str, target_lang: str = "th", context: Optional[str] = None) -> str:
+    def _is_valid_thai_translation(self, text: str) -> bool:
         """
-        Translates text into natural Thai webtoon dialect.
+        Checks if the translation contains valid Thai characters, is not empty, does not echo prompt rules,
+        and does not consist of leftover English explanations or AI meta-language.
+        """
+        if not text or not text.strip():
+            return False
+            
+        stripped = text.strip()
+        # Allow punctuation-only, ellipses, or symbol bubbles (e.g. '???', '...', '!', '?!', '……', '•')
+        if not any(c.isalpha() for c in stripped) and stripped:
+            return True
+            
+        thai_chars = sum('\u0e00' <= c <= '\u0e7f' for c in text)
+        if thai_chars == 0:
+            return False
+            
+        prompt_echoes = [
+            "บริบทเฉพาะเรื่อง", "สรรพนามที่แนะนำ", "คำศัพท์เฉพาะ", "ตอบเฉพาะคำแปล",
+            "ห้ามเขียนติดกัน", "แปลข้อความมังงะ", "ห้ามข้ามหรือรวม", "บังคับเว้นวรรค",
+            "สไตล์การ์ตูน", "system prompt", "กฎเหล็ก", "แปลบทสนทนา",
+            "ไม่พบข้อความที่จะแปล", "ไม่มีข้อความที่จะแปล", "ไม่พบเนื้อหาที่จะแปล",
+            "ไม่มีข้อความให้แปล", "ขออภัยครับ ผมไม่พบ", "ขออภัยค่ะ ดิฉันไม่พบ",
+            "pronounsrecommended:", "qc/n:", "let'sconstruct"
+        ]
+        if any(echo.lower() in text.lower() for echo in prompt_echoes):
+            return False
+            
+        ascii_letters = sum(c.isalpha() and c.isascii() for c in text)
+        if ascii_letters > 20:
+            return False
+            
+        return True
+
+    def _post_process_terminology(self, text: str) -> str:
+        if not text:
+            return ""
+        # 1. Clean unprintable/box/tofu characters and zero-width spaces
+        text = re.sub(r'\[\s*\]|\(\s*\)|【\s*】|[□■☐☒\u25a0-\u25ff\u200b-\u200f\ufeff\ue000-\uf8ff]', '', text)
+        text = re.sub(r'[\[\]\(\)【】]', '', text)
+        text = re.sub(r'[\u4e00-\u9fff]+', '', text)
+        # Clean leaked Vietnamese connector words
+        text = re.sub(r'\b(?:nên|nhưng|và|của)\b', '', text, flags=re.IGNORECASE)
+        # Translate leftover English system notifications
+        text = re.sub(
+            r'NEGATIVE\s+EMOTION\s+VALUE(?:\s+FROM\s+([^,\.\n+]+))?(?:,\s*(\+\d+))?',
+            lambda m: (
+                f"ได้รับแต้มอารมณ์ด้านลบจาก {m.group(1).strip()}, {m.group(2)}"
+                if m.group(1) and m.group(2)
+                else (f"ได้รับแต้มอารมณ์ด้านลบจาก {m.group(1).strip()}" if m.group(1) else "แต้มอารมณ์ด้านลบ")
+            ),
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r'money\.?', 'เงิน', text, flags=re.IGNORECASE)
+        # Strip stray single English OCR/LLM garbage letters attached before Thai words (e.g., gนาย -> นาย)
+        text = re.sub(r'(?:\b|\s)[a-zA-Z]([\u0e00-\u0e7f])', r'\1', text)
+        # Fix manhwa cultivation terminology and scanlator phrasing
+        text = re.sub(r'ครอบครัวใหญ่ๆ|ครอบครัวใหญ่|ครอบครัวผู้ฝึกตน', 'ตระกูลใหญ่', text)
+        text = re.sub(r'องค์กรและครอบครัว', 'องค์กรและตระกูลใหญ่', text)
+        text = re.sub(r'ฉันเป็นธาตุน้ำ|ฉันเป็นประเภทน้ำ|ฉันคือธาตุน้ำ', 'ฉันเป็นผู้ใช้พลังธาตุน้ำ', text)
+        text = re.sub(r'เป็นธาตุน้ำ(!|\.| )', r'เป็นผู้ใช้พลังธาตุน้ำ\1', text)
+        text = re.sub(r'ผู้ฝึกตนประเภทน้ำ|ประเภทน้ำ', 'ผู้ใช้พลังธาตุน้ำ', text)
+        text = re.sub(r'ยากลำบากที่จะแย่งชิงเงิน(?:ของพวกเขา)?', 'แย่งชิงเงินได้ยาก', text)
+        text = re.sub(r'เป็นคนธรรมดาทั่วไปแล้วตอนนี้', 'ตอนนี้เป็นแค่คนธรรมดาทั่วไปแล้ว', text)
+        text = re.sub(r'\bเสียว\b', 'เสี่ยว', text)
+        # Normalize manhwa rank/class/level spellings to uppercase English letter (e.g., ระดับเอ -> ระดับ A, คลาสเอส -> คลาส S)
+        rank_map = {
+            "เอส": "S",
+            "เอฟ": "F",
+            "เอ": "A",
+            "บี": "B",
+            "ซี": "C",
+            "ดี": "D",
+            "อี": "E",
+        }
+        for thai_spelling, eng_letter in rank_map.items():
+            text = re.sub(
+                rf'(ระดับ|คลาส|แรงค์|ขั้น|ระดับของ|คลาสของ|แรงค์ของ)\s*{thai_spelling}\b',
+                rf'\1 {eng_letter}',
+                text
+            )
+        text = re.sub(
+            r'(ระดับ|คลาส|แรงค์|ขั้น|ระดับของ|คลาสของ|แรงค์ของ)\s*([a-fsA-FS])\b',
+            lambda m: f"{m.group(1)} {m.group(2).upper()}",
+            text
+        )
+        text = re.sub(r'ผู้ฝึกตนที่สังกัด|ผู้ฝึกตนที่ไม่ได้สังกัด|ผู้ฝึกตนสังกัด', 'ผู้ฝึกตนไร้สังกัด', text)
+        text = re.sub(r'ดรังเนต|ดรักเนต|ดรากเนต|เครือข่ายเทียนหลัว', 'เครือข่ายสวรรค์', text)
+        text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
+        return text.strip()
+
+    def _post_process_spacing(self, text: str) -> str:
+        """
+        Ensures proper Thai whitespace spacing after punctuation and between clauses,
+        strips reasoning/meta-notes, and deduplicates AI repetition loops.
+        """
+        import re
+        if not text:
+            return ""
+        # Strip <think>...</think> blocks from reasoning models
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        # Strip AI typo correction notes like -"SHOLLD"->"SHOULD" or "A" -> "B"
+        text = re.sub(r'-?\s*["\']?[A-Za-z0-9\-\s]+["\']?\s*->\s*["\']?[A-Za-z0-9\-\s]+["\']?', '', text)
+        # Remove quotes and markdown remnants
+        text = text.strip("\"' ").replace("“", "").replace("”", "")
+        text = re.sub(r'</?think>', '', text, flags=re.IGNORECASE).strip()
+        
+        # Collapse runaway AI repetition loops (if repeated 5+ times, collapse to 2x; allows normal 2-3x manga emphasis)
+        text = re.sub(r'(.{2,25}?)\1{4,}', r'\1\1', text)
+
+        # Translate leftover English system notifications before ASCII count filter
+        text = re.sub(
+            r'NEGATIVE\s+EMOTION\s+VALUE(?:\s+FROM\s+([^,\.\n+]+))?(?:,\s*(\+\d+))?',
+            lambda m: (
+                f"ได้รับแต้มอารมณ์ด้านลบจาก {m.group(1).strip()}, {m.group(2)}"
+                if m.group(1) and m.group(2)
+                else (f"ได้รับแต้มอารมณ์ด้านลบจาก {m.group(1).strip()}" if m.group(1) else "แต้มอารมณ์ด้านลบ")
+            ),
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r'NEGATIVE\s+EMOTION\s+VALUE', 'แต้มอารมณ์ด้านลบ', text, flags=re.IGNORECASE)
+
+        # Deduplicate AI repetition loops (e.g., ""Sentence A""Sentence A + B""Sentence A + B + C"")
+        parts = [p.strip() for p in re.split(r'""+|"|\n', text) if p.strip()]
+        if len(parts) > 1:
+            # If earlier parts are prefixes or subsets, keep only the longest/cleanest part
+            longest_part = max(parts, key=len)
+            text = longest_part
+            
+        # Filter out lines containing AI meta-commentary
+        clean_lines = []
+        prompt_echoes = [
+            "บริบทเฉพาะเรื่อง", "สรรพนามที่แนะนำ", "คำศัพท์เฉพาะ", "ตอบเฉพาะคำแปล",
+            "ห้ามเขียนติดกัน", "แปลข้อความมังงะ", "ห้ามข้ามหรือรวม", "บังคับเว้นวรรค",
+            "สไตล์การ์ตูน", "system prompt", "กฎเหล็ก", "แปลบทสนทนา",
+            "ไม่พบข้อความที่จะแปล", "ไม่มีข้อความที่จะแปล", "ไม่พบเนื้อหาที่จะแปล",
+            "ไม่มีข้อความให้แปล", "ขออภัยครับ ผมไม่พบ", "ขออภัยค่ะ ดิฉันไม่พบ"
+        ]
+        for line in text.split('\n'):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if any(echo.lower() in stripped.lower() for echo in prompt_echoes):
+                continue
+            if re.match(r'^(note:|explanation:|translation:|context:|here is|correction:|หมายเหตุ|คำอธิบาย).*', stripped, flags=re.IGNORECASE):
+                continue
+            ascii_count = sum(c.isalpha() and c.isascii() for c in stripped)
+            if ascii_count > 20:
+                continue
+            clean_lines.append(stripped)
+            
+        text = " ".join(clean_lines)
+        if not text:
+            return ""
+            
+        text = self._post_process_terminology(text)
+        # Fix common literal translation artifacts from Llama-3 ('have a hard time' -> 'มีเวลานาน')
+        text = re.sub(r'มีเวลานานในการ', 'ยากลำบากในการ', text)
+        text = re.sub(r'ใช้เวลานานในการหาเงิน', 'หาเงินอย่างยากลำบาก', text)
+        text = re.sub(r'เกษตรกรที่มีความสามารถ', 'ผู้ฝึกตนที่มีความสามารถ', text)
+        text = re.sub(r'ป้องกันไม่ให้เกษตรกร', 'ป้องกันไม่ให้ผู้ฝึกตน', text)
+        text = re.sub(r'การเลื่อนตำแหน่ง', 'การเลื่อนระดับ', text)
+        text = re.sub(r'เลื่อนตำแหน่งของ', 'เลื่อนระดับของ', text)
+        text = re.sub(r'มีปัญหาในการเก็บเงิน', 'ทวงเงินยาก', text)
+        # Remove unnatural trailing English period (.) at end of Thai sentences
+        text = re.sub(r'([\u0e00-\u0e7f]+)\s*\.\s*$', r'\1', text)
+        # 2. Add space after punctuation marks followed by Thai characters
+        text = re.sub(r'([?!…\.,\-;—~])([\u0e00-\u0e7f])', r'\1 \2', text)
+        # 3. Add space between Thai characters and English words/letters/numbers
+        text = re.sub(r'([\u0e00-\u0e7f])([A-Za-z0-9])', r'\1 \2', text)
+        text = re.sub(r'([A-Za-z0-9])([\u0e00-\u0e7f])', r'\1 \2', text)
+        # Preserve a clear clause boundary when OCR/LLM glues the common
+        # "...บ้างการรอคอย..." construction into one token stream.
+        text = re.sub(r'(บ้าง)(การรอคอย)', r'\1 \2', text)
+        # These are spacing-only repairs for common Thai conversational joins.
+        # They deliberately do not replace words or infer a different meaning.
+        text = re.sub(r'(เลย)(สักนิด)', r'\1 \2', text)
+        text = re.sub(r'(สักนิด)(คิดว่า)', r'\1 \2', text)
+        text = re.sub(r'(เหรอ)(ไม่บ้าง)', r'\1 \2', text)
+        
+        # 4. Intelligent Thai Clause Segmentation using PyThaiNLP
+        try:
+            from pythainlp.tokenize import word_tokenize
+            words = word_tokenize(text)
+            out = []
+            curr_len = 0
+            connectors = {'และ', 'แล้ว', 'แต่', 'แต่ว่า', 'เพราะ', 'เพราะว่า', 'เมื่อ', 'ตอนที่', 'หลังจาก', 'ทว่า', 'ดังนั้น', 'ถ้า', 'หาก', 'เพื่อ', 'ส่วน', 'ถึงแม้', 'แล้วก็', 'มัวแต่', 'ในเมื่อ'}
+            tail_words = {'ล่ะ', 'สิ', 'นะ', 'น่า', 'จัง', 'เลย', 'หรอก', 'สินะ', 'มั้ง', 'เถอะ', 'มั้ย', 'ไหม', 'เหรอ', 'ครับ', 'ค่ะ', 'ด้วย'}
+            starters = {'ฉัน', 'นาย', 'เธอ', 'เขา', 'มัน', 'พวกเรา', 'พวกนาย'}
+            preps = {'ของ', 'กับ', 'ให้', 'แก่', 'จาก', 'แด่', 'ต่อ', 'คือ', 'เป็น'}
+            
+            for i, w in enumerate(words):
+                if w == ' ':
+                    out.append(w)
+                    curr_len = 0
+                    continue
+                prev = words[i-1] if i > 0 else ''
+                if i > 0 and curr_len >= 4 and w in connectors and prev not in preps:
+                    if out and out[-1] != ' ':
+                        out.append(' ')
+                        curr_len = 0
+                elif i > 0 and out and out[-1] in tail_words and curr_len >= 8 and i < len(words) - 1:
+                    out.append(' ')
+                    curr_len = 0
+                elif i > 0 and curr_len >= 16 and w in starters and prev not in preps:
+                    if out and out[-1] != ' ':
+                        out.append(' ')
+                        curr_len = 0
+                    
+                out.append(w)
+                curr_len += len(w)
+                
+            text = ''.join(out)
+        except Exception:
+            # Fallback if PyThaiNLP is unavailable
+            clause_connectors = r'(แต่|แต่ว่า|เพราะ|เพราะว่า|เมื่อ|ตอนที่|หลังจาก|ทว่า|ดังนั้น|ถ้า)'
+            text = re.sub(f'([\u0e00-\u0e7f]{{3,}}?)(?<!ดี)(?<!มาก)(?<!น้อย)({clause_connectors})', r'\1 \2', text)
+            
+        # 5. Clean up any double spaces
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    async def translate_text(self, text: str, target_lang: str = "th", context: Optional[str] = None, genre: str = "modern_cultivation") -> str:
+        """
+        Translates text into natural Thai webtoon dialect with emotion, formatting spaces between clauses, and high grammatical accuracy.
         """
         if not text or not text.strip():
             return ""
+        if not any(c.isalpha() for c in text.strip()):
+            return text.strip()
 
-        user_content = f"Translate the following manga speech bubble text into Thai:\n\n{text}"
+        user_content = f"แปลข้อความมังงะต่อไปนี้เป็นไทยสไตล์การ์ตูน บังคับเว้นวรรคระหว่างประโยคย่อย ห้ามเขียนติดกันเป็นพรืด ห้ามทับศัพท์อังกฤษ และห้ามแต่งเรื่องเอง (ตอบเฉพาะคำแปล):\n\"{text}\""
+        genre_info = get_genre_context_instructions(genre)
+        user_content += f"\n\n{genre_info}"
         if context:
-            user_content += f"\n\nContext/Slang guidance: {context}"
+            user_content += f"\n(บริบทเพิ่มเติม: {context})"
+
+        messages = [
+            {"role": "system", "content": COMPACT_PER_SEGMENT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content}
+        ]
+
+        res = await self.client.generate_chat_completion(messages=messages, temperature=0.3, max_tokens=650)
+        return self._post_process_spacing(res)
+
+    async def translate_batch(self, request_or_texts, target_lang: str = "th", context: Optional[str] = None, genre: str = "modern_cultivation") -> list:
+        """Translate either legacy string lists or the Phase 6.16 structured request."""
+        if not isinstance(request_or_texts, TranslationBatchRequest):
+            return await self._translate_batch_legacy(
+                request_or_texts,
+                target_lang=target_lang,
+                context=context,
+                genre=genre,
+            )
+
+        request = request_or_texts
+        expected_ids = tuple(segment.segment_id for segment in request.segments)
+        if not expected_ids:
+            return []
+        # Optimize input tokens: filter glossary to terms present in current page segments
+        page_texts = " ".join(s.source_text.lower() for s in request.segments)
+        relevant_glossary = [
+            dict(g)
+            for g in request.glossary
+            if isinstance(g, dict) and g.get("source") and str(g.get("source")).lower() in page_texts
+        ]
+        # Optimize context: keep only last 2 context entries as simple strings
+        recent_context = [
+            dict(c) if isinstance(c, dict) else str(c)
+            for c in request.context[-8:]
+        ]
+        body = {
+            "task": "Translate segments into Thai manga dialogue. Return JSON only.",
+            "response_schema": {"translations": [{"id": "string", "th": "string"}]},
+            "genre": str(request.profile.get("genre", "modern_cultivation")) if isinstance(request.profile, dict) else "modern_cultivation",
+            "segments": [
+                {
+                    "segment_id": segment.segment_id,
+                    "id": segment.segment_id,
+                    "text": segment.source_text,
+                }
+                for segment in request.segments
+            ],
+        }
+        if relevant_glossary:
+            body["glossary"] = relevant_glossary
+        if recent_context:
+            body["context"] = recent_context
+
+        messages = [
+            {"role": "system", "content": self.system_prompt + "\nตอบเป็น JSON เท่านั้น ห้ามตัดทอนข้อความ"},
+            {"role": "user", "content": json.dumps(body, ensure_ascii=False)},
+        ]
+        result = None
+        translated = None
+        for attempt in range(2):
+            if isinstance(self.client, GroqClient):
+                completion = await self.client.generate_chat_completion_result(
+                    messages=messages, temperature=0.15, max_tokens=1800
+                )
+            else:
+                completion = await self.client.generate_chat_completion(
+                    messages=messages, temperature=0.15, max_tokens=1800
+                )
+            result = completion if isinstance(completion, CompletionResult) else CompletionResult(
+                text=str(completion or ""), model="", attempts=1
+            )
+            try:
+                translated = parse_translation_response(result.text, expected_ids)
+                break
+            except TranslationResponseError:
+                if attempt == 1:
+                    try:
+                        translated = parse_translation_response(result.text, expected_ids, allow_partial=True)
+                    except TranslationResponseError:
+                        raise
+                else:
+                    messages[0]["content"] = self.system_prompt + "\nสำคัญมาก: บังคับตอบเป็น JSON object ที่ถูกต้องเท่านั้น ห้ามมีคำอธิบาย ห้ามมี markdown"
+
+        for segment in request.segments:
+            if segment.segment_id not in translated:
+                single_th = await self.translate_text(
+                    segment.source_text,
+                    genre=str(request.profile.get("genre", "modern_cultivation")) if isinstance(request.profile, dict) else "modern_cultivation",
+                )
+                translated[segment.segment_id] = single_th
+
+        return [
+            TranslationResult(
+                segment_id=segment.segment_id,
+                source_text=segment.source_text,
+                draft_thai=translated[segment.segment_id],
+                final_thai=self._post_process_terminology(translated[segment.segment_id]),
+                model=result.model,
+                attempts=result.attempts,
+                qc_status="PENDING",
+            )
+            for segment in request.segments
+        ]
+
+    async def _translate_batch_legacy(self, texts: list, target_lang: str = "th", context: Optional[str] = None, genre: str = "modern_cultivation") -> list:
+        """
+        Translates a list of speech bubble texts from a single manga page in ONE API call.
+        Reduces Groq API calls by 5x-10x, avoiding rate limit errors and preventing hanging.
+        """
+        if not texts:
+            return []
+        
+        if len(texts) == 1:
+            res = await self.translate_text(texts[0], target_lang=target_lang, context=context, genre=genre)
+            return [res]
+            
+        if len(texts) > 8:
+            all_results = []
+            for i in range(0, len(texts), 8):
+                chunk = texts[i:i+8]
+                chunk_res = await self.translate_batch(chunk, target_lang=target_lang, context=context, genre=genre)
+                all_results.extend(chunk_res)
+            return all_results
+            
+        numbered_lines = "\n".join([f"[{i+1}] {t}" for i, t in enumerate(texts)])
+        user_content = (
+            f"แปลเป็นไทยสไตล์มังฮวา เรียงตาม [1]... กำกับ ห้ามย่อ ห้ามสรุป ห้ามตัดทอนข้อความ ต้องแปลให้ครบถ้วนทุกประโยคทุกคำ (บังคับเว้นวรรคคั่นประโยคย่อยให้น่าอ่าน ห้ามเขียนติดกันเป็นพรืด):\n{numbered_lines}"
+        )
+        genre_info = get_genre_context_instructions(genre)
+        user_content += f"\n\n{genre_info}"
+        if context:
+            user_content += f"\n(บริบทเพิ่มเติม: {context})"
 
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_content}
         ]
 
-        return await self.client.generate_chat_completion(messages=messages, temperature=0.3)
+        res = await self.client.generate_chat_completion(messages=messages, temperature=0.15, max_tokens=2500)
+        if not res or not res.strip():
+            print(f"[Batch Fallback Skipped] Batch API call failed or in cooldown. Preserving original text for {len(texts)} boxes without retrying.", flush=True)
+            return [""] * len(texts)
+            
+        import re
+        # Strip <think> blocks before parsing line by line
+        res_clean = re.sub(r'<think>.*?</think>', '', res, flags=re.DOTALL | re.IGNORECASE)
+        res_clean = re.sub(r'</?think>', '', res_clean, flags=re.IGNORECASE).strip()
+        
+        results = []
+        lines = res_clean.split("\n")
+        parsed_map = {}
+        for line in lines:
+            match = re.match(r"^\[?(\d+)\]?[\s\.\:\-]\s*(.*)$", line.strip())
+            if match:
+                idx = int(match.group(1)) - 1
+                parsed_map[idx] = self._post_process_spacing(match.group(2))
+        
+        for i in range(len(texts)):
+            val = parsed_map.get(i)
+            # If batch translation returned a non-empty string for this box, accept it!
+            if val is not None and val.strip() and self._is_valid_thai_translation(val):
+                results.append(val)
+            else:
+                raw_text = texts[i].strip()
+                # If box contains NO letters (e.g. only punctuation, ellipses '...', symbols, numbers), keep as-is without API call
+                if not any(c.isalpha() for c in raw_text) and raw_text:
+                    results.append(raw_text)
+                    continue
+
+                is_url = any(w in raw_text.lower() for w in ["http://", "https://", "www.", ".com/", ".org/", ".net/"])
+                if is_url:
+                    results.append("")
+                    continue
+                
+                # Single fallback translation if missed in batch
+                single_res = await self.translate_text(raw_text, target_lang=target_lang, context=context, genre=genre)
+                results.append(single_res if (single_res and single_res.strip()) else raw_text)
+            
+        return results
