@@ -116,6 +116,10 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "A: ฉันจะไปหาผลประโยชน์ดีกว่า มัวแต่รอซากปรักหักพังเปิดมันน่าเบื่อ\n"
     "Q: You are too stingy Li Yixiao, you have to put yourself in the same boat as everyone\n"
     "A: นายงกมากๆ เลย หลี่อี้เซี่ยว นายต้องยัดตัวเองเข้าไปในเรือลำเดียวกันกับทุกๆ คน\n"
+    "Q: SO WHAT? WHY DOES THIS MATTER TO ME?\n"
+    "A: แล้วไง มันเกี่ยวอะไรกับฉันด้วยล่ะ?\n"
+    "Q: TO ME\n"
+    "A: เกี่ยวกับฉันล่ะ\n"
     "❌ AI ทื่อ: ฉันจะทำเอง\n"
     "✅ คนแปลอาชีพ: ก็แกรั้นจะให้ฉันทำเองนี่นา\n"
     "Q: You are making a fool of yourself\n"
@@ -126,7 +130,7 @@ COMPACT_PER_SEGMENT_SYSTEM_PROMPT = (
     "You are an expert manhwa translator. Translate dialogue into natural spoken Thai.\n"
     "RULES:\n"
     "1. Pronouns: Never use formal 'คุณ'. Use ฉัน, นาย, แก, เธอ, or ท่าน.\n"
-    "2. Complete Translation: Never leave English or Chinese words untranslated. Output 100% Thai script. Transliterate terms (Garuda/迦楼罗 -> 'การูดา'). NEVER output CJK Chinese/Korean characters.\n"
+    "2. Complete Translation: Never leave English fragments (e.g. 'TO ME', 'FOR ME') or Chinese words untranslated. Output 100% Thai script. Transliterate terms (Garuda/迦楼罗 -> 'การูดา'). NEVER output CJK Chinese/Korean characters.\n"
     "3. Terms: Awakening/Awaken = 'ตื่นรู้', Awakened/Awakener = 'ผู้ตื่นรู้', Cultivator/Cultivation = 'ผู้ฝึกตน', Water-type = 'ผู้ใช้พลังธาตุน้ำ', Family/Clan = 'ตระกูล'. 'Then I'll be a D level?' -> 'งั้น... ฉันเป็นระดับ D ก็แล้วกัน?' (deciding a rank).\n"
     "4. Output ONLY translated Thai text without introductory commentary or periods."
 )
@@ -235,6 +239,10 @@ class AITranslatorEngine:
         text = re.sub(r'\bอเวกเกน\b|\bอเวกเคน\b', 'ตื่นรู้', text)
         text = re.sub(r'โทรไปบ้านเกิด', 'บุกไปถึงถิ่น', text)
         text = re.sub(r'จ่ายบิลทั้งหมดกับพวกเขา|ชำระบิลทั้งหมดกับพวกเขา', 'คิดบัญชีแค้นทั้งหมดให้สาสม', text)
+        text = re.sub(r'(?:ทำไมเรื่องนี้|เรื่องนี้)\s*TO\s*ME\b', 'เรื่องนี้ต้องเกี่ยวกับฉันด้วย', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bTO\s*ME\b', 'เกี่ยวกับฉันล่ะ', text)
+        text = re.sub(r'\bFOR\s*ME\b', 'สำหรับฉัน', text)
+        text = re.sub(r'\bWITH\s*ME\b', 'กับฉัน', text)
         text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
         return text.strip()
 
