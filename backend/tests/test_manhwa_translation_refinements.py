@@ -109,3 +109,12 @@ def test_post_process_spacing_fixes_unaffiliated_dragnet_and_phrasing():
     assert "ระดับ B" in processed4
     assert "C LEVEL" not in processed4
     assert "B LEVEL" not in processed4
+
+    raw5 = "TL/N: ซานซิ่ว คือบริเวณบนเกาะช้าง"
+    processed5 = engine._post_process_terminology(raw5)
+    assert "หมายเหตุผู้แปล:" in processed5
+    assert "TL/N:" not in processed5
+
+    raw6 = "ทั้งพี่และน้องสาวมีถูกทำลายก่อน"
+    processed6 = engine._post_process_terminology(raw6)
+    assert "หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?" in processed6

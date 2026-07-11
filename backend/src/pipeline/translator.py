@@ -104,6 +104,8 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "9. Elements & System UI: Water-type -> 'ผู้ใช้พลังธาตุน้ำ / สายธาตุน้ำ'; NEGATIVE EMOTION VALUE -> 'แต้มอารมณ์ด้านลบ / ได้รับแต้มอารมณ์ด้านลบ'.\n"
     "10. Ranks/Levels/Classes: Translate 'E-LEVEL'/Level E -> 'ระดับ E'. ONLY single uppercase letters for ranks ('A', 'B', 'C', 'D', 'E', 'S') are allowed in Thai text (never leave English words like 'LEVEL' or 'CLASS').\n"
     "11. Character Attitude & Nuance: Ensure dialogue reflects character intent accurately (e.g. scheming/choosing rank vs complaining).\n"
+    "12. Broken English Grammar Correction: Manhwa source text often has poor grammar (e.g. 'DID BOTH BROTHER AND SISTER HAVE BEEN IN RUINS BEFORE.'). NEVER translate word-for-word into gibberish ('ทั้งพี่และน้องสาวมีถูกทำลายก่อน'). Always translate the intended context into natural Thai: 'หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?'. 'ruins/ruin' = 'ซากปรักหักพัง' (never 'ถูกทำลาย').\n"
+    "13. Translator Notes (TL/N, T/N): Always translate 'TL/N:' or 'T/N:' prefix as 'หมายเหตุผู้แปล:' and translate the entire explanatory note completely into Thai script (never leave English words or fragmented lines).\n"
     "STANDARD TRANSLATION EXAMPLES:\n"
     "Q: Oh this is my sister Lu Xiaoyu, she will follow me to the ruins too\n"
     "A: โอ้นี่น้องสาวฉันลู่เสี่ยวอวี๋ เธอจะตามฉันไปที่ซากปรักหักพังด้วย\n"
@@ -113,6 +115,10 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "A: ฉันเนี่ยนะ? ระดับ E? นี่มันเรื่องตลกอะไรกัน?\n"
     "Q: I REALLY ENVY THEM. I DON'T KNOW WHEN WE WILL REACH THE C LEVEL LET ALONE B LEVEL.\n"
     "A: ฉันอิจฉาพวกเขาจริงๆ ไม่รู้เลยว่าเมื่อไหร่พวกเราถึงจะไปถึงระดับ C นับประสาอะไรกับระดับ B\n"
+    "Q: DID BOTH BROTHER AND SISTER HAVE BEEN IN RUINS BEFORE.\n"
+    "A: หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?\n"
+    "Q: TL/N: SAN XIU (THREE STAR) IS THE AREA IN KOH CHANG ISLAND WHERE THE RUIN IS OPENED\n"
+    "A: หมายเหตุผู้แปล: ซานซิ่ว (สามดาว) คือบริเวณบนเกาะช้างที่เป็นจุดเปิดซากปรักหักพัง\n"
     "Q: SOONER OR LATER, I WILL CALL THEIR HOMETOWN, SO I CAN SETTLE ALL THE BILLS WITH THEM.\n"
     "A: ไม่ช้าก็เร็ว ฉันจะบุกไปถึงถิ่นของพวกมัน เพื่อคิดบัญชีแค้นทั้งหมดให้สาสม\n"
     "Q: HOW WAS IT? DO YOU LIKE IT?\n"
@@ -253,6 +259,8 @@ class AITranslatorEngine:
         text = re.sub(r'\bWITH\s*ME\b', 'กับฉัน', text)
         text = re.sub(r'นายเป็นคนดีที่สุด(!|\.|$)?', r'สุดยอดไปเลยใช่ไหมล่ะ\1', text)
         text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
+        text = re.sub(r'\b(?:TL/N|T/N|TL\\N)\s*:\s*', 'หมายเหตุผู้แปล: ', text, flags=re.IGNORECASE)
+        text = re.sub(r'ทั้งพี่และ\s*น้องสาวมี\s*ถูกทำลาย\s*ก่อน', 'หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?', text)
         return text.strip()
 
     def _post_process_spacing(self, text: str) -> str:
