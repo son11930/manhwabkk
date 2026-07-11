@@ -123,6 +123,7 @@ async def test_worker_full_translation_pipeline(test_session):
     
     mock_translator = AsyncMock()
     mock_translator.translate_text.return_value = "จงตื่นขึ้น!"
+    mock_translator._is_valid_thai_translation = MagicMock(return_value=True)
     
     mock_r2 = AsyncMock(spec=R2StorageService)
     mock_r2.upload_image.return_value = "https://pub-test.r2.dev/solo-leveling/chapter-1/1.jpg"
@@ -155,4 +156,22 @@ async def test_worker_full_translation_pipeline(test_session):
     chapter = await chapter_repo.find_by_series_and_number(series.id, "chapter-1", include_pages=True)
     assert chapter is not None
     assert len(chapter.pages) == 1
-    assert chapter.pages[0].image_url == "https://pub-test.r2.dev/solo-leveling/chapter-1/1.jpg"
+    assert chapter.pages[0].image_url.startswith("https://pub-test.r2.dev/solo-leveling/chapter-1/1.jpg")
+
+def test_translator_dynamic_genre_contextualizer():
+    """Verify that get_genre_context_instructions returns correct pronoun and stylistic instructions for manga genres."""
+    from src.pipeline.translator import get_genre_context_instructions
+    wuxia_instructions = get_genre_context_instructions("wuxia")
+    assert "ข้า" in wuxia_instructions and "เจ้า" in wuxia_instructions and "อาวุโส" in wuxia_instructions
+    
+    action_instructions = get_genre_context_instructions("modern_action")
+    assert "แก" in action_instructions or "นาย" in action_instructions
+    assert "แรงก์ S" in action_instructions
+
+def test_translator_veteran_prompt_examples():
+    """Verify that AITranslatorEngine uses Veteran Scanlator persona and contains contrastive human scanlation examples."""
+    from src.pipeline.translator import AITranslatorEngine
+    translator = AITranslatorEngine()
+    assert "Veteran Scanlator" in translator.system_prompt or "นักแปลมังฮวา" in translator.system_prompt
+    assert "ก็แกรั้นจะให้ฉันทำเองนี่นา" in translator.system_prompt
+    assert "โชว์โง่" in translator.system_prompt

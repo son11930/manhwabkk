@@ -55,7 +55,7 @@ export const Home: React.FC = () => {
   useEffect(() => {
     const fetchSeries = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/v1/series');
+        const res = await fetch('/api/v1/series');
         if (res.ok) {
           const json = await res.json();
           if (json.data && json.data.length > 0) {

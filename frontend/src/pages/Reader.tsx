@@ -49,8 +49,8 @@ export const Reader: React.FC = () => {
       setLoading(true);
       try {
         const [resCh, resSe] = await Promise.all([
-          fetch(`http://localhost:8000/api/v1/series/${seriesSlug}/chapters/${chapterNum}`),
-          fetch(`http://localhost:8000/api/v1/series/${seriesSlug}`)
+          fetch(`/api/v1/series/${seriesSlug}/chapters/${chapterNum}`),
+          fetch(`/api/v1/series/${seriesSlug}`)
         ]);
 
         if (resSe.ok) {
@@ -167,13 +167,6 @@ export const Reader: React.FC = () => {
                   loading="lazy"
                   className="w-full max-w-full h-auto object-contain select-none shadow-md sm:rounded-lg"
                 />
-                
-                {/* Inter-page Monetization Ad every 2 pages */}
-                {(index + 1) % 2 === 0 && (
-                  <div className="w-full py-4 px-2">
-                    <AdSlot position="in-between" />
-                  </div>
-                )}
               </React.Fragment>
             ))}
           </div>

@@ -23,7 +23,7 @@ export const App: React.FC = () => {
         {/* Footer */}
         <footer className="glass-panel border-t border-gray-800 py-8 text-center text-xs text-gray-500">
           <div className="max-w-7xl mx-auto px-4 space-y-2">
-            <p className="font-bold text-gray-400">MANHWA.THAI - AI Manga & Manhua Translation Platform</p>
+            <p className="font-bold text-gray-400">BKKManhwa - AI Manga & Manhua Translation Platform</p>
             <p>"คนแรกสั่งแปล คนต่อไปอ่านฟรี!" Powered by Cloudflare R2 Immutable Storage & Groq LLM</p>
             <p className="text-[10px] text-gray-600">สงวนสิทธิ์ผู้ดูแลระบบสูงสุด (Super Admin Restricted Area)</p>
           </div>

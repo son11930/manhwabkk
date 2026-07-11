@@ -27,7 +27,7 @@ export const Admin: React.FC = () => {
     setError(null);
 
     try {
-      const res = await fetch('http://localhost:8000/api/v1/auth/login', {
+      const res = await fetch('/api/v1/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
@@ -57,7 +57,7 @@ export const Admin: React.FC = () => {
 
   const fetchSeriesList = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/v1/series');
+      const res = await fetch('/api/v1/series');
       if (res.ok) {
         const json = await res.json();
         setSeriesList(json.data || mockSeries);
@@ -86,7 +86,7 @@ export const Admin: React.FC = () => {
     }
 
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/series/${slug}`, {
+      const res = await fetch(`/api/v1/series/${slug}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });

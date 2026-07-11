@@ -38,3 +38,26 @@ class PageRepository(BaseSQLAlchemyRepository[Page]):
         query = select(Page).where(Page.chapter_id == chapter_id).order_by(Page.page_index).execution_options(populate_existing=True)
         result = await self.session.execute(query)
         return list(result.scalars().all())
+
+    async def replace_for_chapter(
+        self,
+        chapter: Chapter,
+        pages: List[dict],
+        *,
+        is_translated: bool,
+    ) -> List[Page]:
+        """Atomically swap reader pages only after a fully staged run succeeds."""
+        try:
+            existing = await self.find_by_chapter(chapter.id)
+            for page in existing:
+                await self.session.delete(page)
+            replacements = [Page(chapter_id=chapter.id, **page) for page in pages]
+            self.session.add_all(replacements)
+            chapter.is_translated = is_translated
+            await self.session.commit()
+            for page in replacements:
+                await self.session.refresh(page)
+            return replacements
+        except Exception:
+            await self.session.rollback()
+            raise

@@ -34,8 +34,5 @@ echo * Press any key in this window to stop all servers and exit cleanly.
 
 pause > nul
 
-echo [STOPPING] Shutting down all server processes...
-taskkill /F /IM uvicorn.exe /T > nul 2>&1
-taskkill /F /IM node.exe /T > nul 2>&1
-echo [DONE] All servers stopped successfully. Good bye!
+call "%~dp0stop.bat"
 timeout /t 2 /nobreak > nul

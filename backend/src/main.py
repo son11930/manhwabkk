@@ -1,5 +1,24 @@
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+import sys
+if sys.platform == "win32":
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            mode.value &= ~0x0040  # Disable ENABLE_QUICK_EDIT_MODE
+            mode.value |= 0x0080   # Enable ENABLE_EXTENDED_FLAGS
+            kernel32.SetConsoleMode(handle, mode)
+    except Exception:
+        pass
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from src.config import settings
@@ -7,6 +26,7 @@ from src.database import engine, Base, async_session_maker
 from src.common.exceptions import DomainException
 from src.common.envelope import error_response
 from src.domains.auth.service import AuthService
+from src.domains.translation import models as translation_models  # noqa: F401
 from src.domains.auth.router import router as auth_router
 from src.domains.manga.router import router as manga_router
 from src.domains.jobs.router import router as jobs_router

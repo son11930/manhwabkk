@@ -18,7 +18,7 @@ export const Navbar: React.FC = () => {
             </div>
             <div>
               <span className="text-xl font-black glow-text tracking-wider">
-                MANHWA.THAI
+                BKKManhwa
               </span>
               <span className="block text-[10px] text-gray-400 font-medium">
                 คนแรกสั่งแปล คนต่อไปอ่านฟรี

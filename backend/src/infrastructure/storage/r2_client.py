@@ -20,8 +20,9 @@ def get_r2_client():
         "config": config,
     }
     
-    # Use real R2 endpoint in staging/prod, bypass for local test mocks
-    if not settings.R2_ACCOUNT_ID.startswith("12345678") and settings.APP_ENV != "local":
+    import os
+    # Use real R2 endpoint if not running in pytest mock mode
+    if "PYTEST_CURRENT_TEST" not in os.environ and not settings.R2_ACCOUNT_ID.startswith("12345678"):
         client_kwargs["endpoint_url"] = settings.r2_endpoint_url
         
     return boto3.client(**client_kwargs)

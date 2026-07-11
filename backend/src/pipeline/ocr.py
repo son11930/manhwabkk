@@ -1,100 +1,123 @@
-from typing import List, Dict, Any, Tuple
-from PIL import Image
-import io
+from __future__ import annotations
 
-import numpy as np
+from typing import Any, List
+import asyncio
+
 import cv2
+import numpy as np
+
+from src.pipeline.contracts import OCRSegment
+
 
 class MangaOCREngine:
-    """
-    OCR Engine for detecting speech bubbles and extracting English text.
-    Uses RapidOCR (ONNX Runtime) for ultra-fast and accurate speech bubble detection.
-    """
+    """Extracts ordered OCR segments while retaining line-level evidence."""
+
     def __init__(self):
+        import os
+        for env_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            if env_key not in os.environ:
+                os.environ[env_key] = "2"
+        try:
+            cv2.setNumThreads(2)
+        except Exception:
+            pass
         try:
             from rapidocr_onnxruntime import RapidOCR
+
             self.ocr_engine = RapidOCR()
             self.is_ready = True
         except Exception:
             self.ocr_engine = None
             self.is_ready = False
 
-    async def detect_and_extract(self, image_bytes: bytes) -> List[Dict[str, Any]]:
-        """
-        Analyzes image bytes and returns speech bubble bounding boxes with detected text.
-        Format: [{'box': (left, top, right, bottom), 'text': 'extracted text'}]
-        """
+    @staticmethod
+    def _is_glued_text(text: str) -> bool:
+        return any(len(token) >= 12 for token in text.split() if token.isupper())
+
+    def detect_and_extract_sync(self, image_bytes: bytes, page_index: int = 0) -> List[OCRSegment]:
         if not self.is_ready or not image_bytes:
             return []
 
         try:
-            # Convert image bytes to numpy BGR image for OpenCV/RapidOCR
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if img_bgr is None:
+            image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
                 return []
 
-            res, _ = self.ocr_engine(img_bgr)
-            if not res or len(res) == 0:
+            scale = 1.0
+            if image.shape[1] > 2400:
+                scale = 2400.0 / image.shape[1]
+                image = cv2.resize(image, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+
+            response = self.ocr_engine(image)
+            result = response[0] if isinstance(response, tuple) else response
+            if not result:
                 return []
 
-            raw_boxes = []
-            for item in res:
-                poly = item[0]
-                text = str(item[1]).strip()
-                conf = float(item[2])
-                if conf < 0.4 or not text or len(text) < 2:
+            lines: list[dict[str, Any]] = []
+            for item in result:
+                polygon, raw_text, raw_confidence = item[0], str(item[1]).strip(), float(item[2])
+                if raw_confidence < 0.4 or len(raw_text) < 2:
                     continue
-
-                left = int(min(pt[0] for pt in poly))
-                top = int(min(pt[1] for pt in poly))
-                right = int(max(pt[0] for pt in poly))
-                bottom = int(max(pt[1] for pt in poly))
-
+                left = int(min(point[0] for point in polygon) / scale)
+                top = int(min(point[1] for point in polygon) / scale)
+                right = int(max(point[0] for point in polygon) / scale)
+                bottom = int(max(point[1] for point in polygon) / scale)
                 if right - left < 10 or bottom - top < 10:
                     continue
-
-                raw_boxes.append({
+                lines.append({
                     "left": left,
                     "top": top,
                     "right": right,
                     "bottom": bottom,
-                    "text": text
+                    "text": raw_text,
+                    "confidence": raw_confidence,
                 })
 
-            if not raw_boxes:
+            if not lines:
                 return []
 
-            # Group vertically adjacent lines that belong to the same speech bubble
-            sorted_boxes = sorted(raw_boxes, key=lambda b: b['top'])
-            grouped = []
-            current = sorted_boxes[0]
-            for b in sorted_boxes[1:]:
-                gap_y = b['top'] - current['bottom']
-                height_curr = max(current['bottom'] - current['top'], 15)
-                center_curr = (current['left'] + current['right']) / 2
-                center_b = (b['left'] + b['right']) / 2
-                width_max = max(current['right'] - current['left'], b['right'] - b['left'], 40)
-
-                # Merge condition: vertical gap <= 1.5 * line height AND horizontal alignment close
-                if gap_y <= height_curr * 1.8 and abs(center_curr - center_b) <= width_max * 0.8:
-                    current['left'] = min(current['left'], b['left'])
-                    current['top'] = min(current['top'], b['top'])
-                    current['right'] = max(current['right'], b['right'])
-                    current['bottom'] = max(current['bottom'], b['bottom'])
-                    current['text'] += " " + b['text']
+            grouped: list[dict[str, Any]] = []
+            current = dict(sorted(lines, key=lambda line: (line["top"], line["left"]))[0])
+            current["raw_lines"] = [current["text"]]
+            current["confidences"] = [current["confidence"]]
+            for line in sorted(lines, key=lambda value: (value["top"], value["left"]))[1:]:
+                vertical_gap = line["top"] - current["bottom"]
+                current_height = max(current["bottom"] - current["top"], 15)
+                current_center = (current["left"] + current["right"]) / 2
+                line_center = (line["left"] + line["right"]) / 2
+                max_width = max(current["right"] - current["left"], line["right"] - line["left"], 40)
+                same_bubble = vertical_gap <= current_height * 1.2 and abs(current_center - line_center) <= max_width * 0.5
+                if same_bubble:
+                    current["left"] = min(current["left"], line["left"])
+                    current["top"] = min(current["top"], line["top"])
+                    current["right"] = max(current["right"], line["right"])
+                    current["bottom"] = max(current["bottom"], line["bottom"])
+                    current["raw_lines"].append(line["text"])
+                    current["confidences"].append(line["confidence"])
                 else:
-                    grouped.append({
-                        "box": (current['left'], current['top'], current['right'], current['bottom']),
-                        "text": current['text'].strip()
-                    })
-                    current = b
-            grouped.append({
-                "box": (current['left'], current['top'], current['right'], current['bottom']),
-                "text": current['text'].strip()
-            })
+                    grouped.append(current)
+                    current = dict(line)
+                    current["raw_lines"] = [line["text"]]
+                    current["confidences"] = [line["confidence"]]
+            grouped.append(current)
 
-            return grouped
-        except Exception as e:
-            print(f"[OCR Error] {e}")
+            segments: list[OCRSegment] = []
+            for reading_order, item in enumerate(sorted(grouped, key=lambda value: (value["top"], value["left"])), start=1):
+                raw_lines = tuple(item["raw_lines"])
+                source_text = " ".join(raw_lines).strip()
+                segments.append(OCRSegment(
+                    segment_id=f"{page_index}:{reading_order}",
+                    page_index=page_index,
+                    reading_order=reading_order,
+                    box=(item["left"], item["top"], item["right"], item["bottom"]),
+                    raw_lines=raw_lines,
+                    source_text=source_text,
+                    confidence=min(item["confidences"]),
+                ))
+            return segments
+        except Exception as error:
+            print(f"[OCR Error] {error}")
             return []
+
+    async def detect_and_extract(self, image_bytes: bytes, page_index: int = 0) -> List[OCRSegment]:
+        return await asyncio.to_thread(self.detect_and_extract_sync, image_bytes, page_index)

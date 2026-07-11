@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sparkles, Link as LinkIcon, CheckCircle2, Loader2, AlertTriangle, ArrowRight } from 'lucide-react';
 import { AdSlot } from '../components/AdSlot';
@@ -20,6 +20,14 @@ export const SubmitJob: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
+  useEffect(() => {
+    const savedJobId = localStorage.getItem('active_job_id');
+    const savedJobUrl = localStorage.getItem('active_job_url');
+    if (savedJobId) {
+      pollJobProgress(savedJobId, savedJobUrl || '');
+    }
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sourceUrl || !sourceUrl.startsWith('http')) {
@@ -31,7 +39,7 @@ export const SubmitJob: React.FC = () => {
     setError(null);
 
     try {
-      const res = await fetch('http://localhost:8000/api/v1/jobs/submit', {
+      const res = await fetch('/api/v1/jobs/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source_url: sourceUrl })
@@ -44,6 +52,8 @@ export const SubmitJob: React.FC = () => {
       const json = await res.json();
       const jobId = json.data.id;
       setJobStatus(json.data);
+      localStorage.setItem('active_job_id', jobId);
+      localStorage.setItem('active_job_url', sourceUrl);
 
       // Poll real backend worker progress
       pollJobProgress(jobId, sourceUrl);
@@ -66,7 +76,7 @@ export const SubmitJob: React.FC = () => {
     const { manga_slug, chapter_number } = parseUrlToSlugAndChapter(url);
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`http://localhost:8000/api/v1/jobs/${id}`);
+        const res = await fetch(`/api/v1/jobs/${id}`);
         if (res.ok) {
           const json = await res.json();
           const data = json.data;
@@ -76,10 +86,16 @@ export const SubmitJob: React.FC = () => {
               manga_slug: data.manga_slug || manga_slug,
               chapter_number: data.chapter_number || chapter_number
             });
-            if (data.status === 'COMPLETED' || data.status === 'FAILED') {
+            if (['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(data.status)) {
+              localStorage.removeItem('active_job_id');
+              localStorage.removeItem('active_job_url');
               clearInterval(interval);
             }
           }
+        } else if (res.status === 404) {
+          localStorage.removeItem('active_job_id');
+          localStorage.removeItem('active_job_url');
+          clearInterval(interval);
         }
       } catch {
         // Ignore network errors during polling
@@ -148,7 +164,11 @@ export const SubmitJob: React.FC = () => {
         return <span className="px-3 py-1 rounded-full text-xs font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30 animate-pulse">🕸️ กำลังดึงภาพและตัดคำ...</span>;
       case 'TRANSLATING':
         return <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30 animate-pulse">🧠 AI Groq กำลังแปลและถมพื้นหลัง...</span>;
+      case 'QUALITY_CHECKING':
+        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse">🔍 AI กำลังตรวจสอบคุณภาพและฝังคำแปลไทย...</span>;
       case 'COMPLETED':
+      case 'COMPLETED_WITH_WARNINGS':
+      case 'SHADOW_COMPLETED':
         return <span className="px-3 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30">✅ แปลสำเร็จเรียบร้อย!</span>;
       default:
         return <span className="px-3 py-1 rounded-full text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30">❌ เกิดข้อผิดพลาด</span>;
@@ -191,7 +211,7 @@ export const SubmitJob: React.FC = () => {
                   onChange={(e) => setSourceUrl(e.target.value)}
                   placeholder="https://example.com/manga/solo-leveling/chapter-1"
                   className="w-full pl-11 pr-4 py-4 rounded-2xl bg-dark-900/80 border border-gray-700 text-white placeholder-gray-500 focus:outline-none focus:border-accent-cyan focus:ring-2 focus:ring-accent-cyan/20 transition-all text-sm sm:text-base font-medium"
-                  disabled={submitting || (jobStatus !== null && jobStatus.status !== 'COMPLETED')}
+                  disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(jobStatus.status))}
                 />
               </div>
               {error && (
@@ -218,7 +238,7 @@ export const SubmitJob: React.FC = () => {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSourceUrl("https://flamecomics.xyz/series/1/3efdb83fccbc577a")}
+                  onClick={() => setSourceUrl("https://flamecomics.me/series/omniscient-reader-chapter-1/")}
                   className="px-2.5 py-1 rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700/60 text-xs text-accent-purple font-semibold transition-all"
                 >
                   ⚡ Flame Comics
@@ -228,18 +248,19 @@ export const SubmitJob: React.FC = () => {
 
             <button
               type="submit"
-              disabled={submitting || (jobStatus !== null && jobStatus.status !== 'COMPLETED' && jobStatus.status !== 'FAILED')}
-              className="glow-btn w-full py-4 text-base font-black shadow-xl"
+              disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(jobStatus.status))}
+              className="w-full py-4 rounded-2xl bg-gradient-to-r from-accent-purple via-accent-blue to-accent-cyan text-white font-extrabold text-sm sm:text-base flex items-center justify-center space-x-2 shadow-xl hover:shadow-2xl hover:scale-[1.01] active:scale-[0.99] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {submitting ? (
-                <span className="flex items-center justify-center space-x-2">
+                <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>กำลังส่งข้อมูลเข้าสู่ระบบ AI...</span>
-                </span>
+                  <span>กำลังส่งคำสั่งไปที่ AI Pipeline...</span>
+                </>
               ) : (
-                <span className="flex items-center justify-center space-x-2">
-                  <span>⚡ เริ่มแปลภาษาไทยทันที (อ่านฟรีทุกคน)</span>
-                </span>
+                <>
+                  <Sparkles className="w-5 h-5" />
+                  <span>สั่งแปลภาษาไทยทันที (AI Translation)</span>
+                </>
               )}
             </button>
           </form>
@@ -272,7 +293,7 @@ export const SubmitJob: React.FC = () => {
               </div>
 
               {/* Completion Action */}
-              {jobStatus.status === 'COMPLETED' && (
+              {['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED'].includes(jobStatus.status) && (
                 <div className="p-4 rounded-2xl bg-green-500/10 border border-green-500/30 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="flex items-center space-x-3 text-center sm:text-left">
                     <CheckCircle2 className="w-8 h-8 text-green-400 shrink-0" />

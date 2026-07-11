@@ -1,0 +1,23 @@
+[
+  {
+    "case_id": "spare-me-great-lord-153-page-7-bubble-1",
+    "series_slug": "spare-me-great-lord",
+    "chapter_number": "chapter-153",
+    "page_index": 7,
+    "segment_id": "7:1",
+    "source_text": "In the past, it was either students or Dragnet. I had a hard time grabbing their money. But they are common people now so it should be easy to loot them.",
+    "bad_translation": "ในสมัยก่อน นักเรียนหรือเครือข่ายสวรรค์ มันสู้รบเพื่อแย่งชิงเงินของคนอื่นยากมาก",
+    "reference_translation": "เมื่อก่อนมีแต่นักเรียนหรือไม่ก็พวกเครือข่ายสวรรค์ ฉันเลยเอาเงินจากพวกนั้นได้ยาก แต่ตอนนี้พวกเขาเป็นคนธรรมดาแล้ว น่าจะปล้นได้ง่าย ๆ",
+    "required_meanings": [
+      ["เมื่อก่อน", "ในอดีต"],
+      ["นักเรียน"],
+      ["เครือข่ายสวรรค์"],
+      ["เอาเงิน", "ปล้น"],
+      ["ยาก", "ลำบาก"],
+      ["ตอนนี้", "ตอนนี้พวกเขา"],
+      ["คนธรรมดา"],
+      ["ง่าย"]
+    ],
+    "forbidden_meanings": ["สู้รบ", "ต่อสู้กัน", "แย่งชิงเงินของคนอื่น"]
+  }
+]

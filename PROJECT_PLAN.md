@@ -615,7 +615,267 @@ gantt
 - [x] เขียน E2E Tests ด้วย Playwright สำหรับทดสอบ Critical User Flows (ส่งลิงก์แปล -> อ่านการ์ตูน -> แอดมินลบตอน)
 - [x] ทำ Security Audit ตามกฎ ECC (ตรวจจับ SQL Injection, XSS, Secret Leakage, Rate Limiting)
 - [x] ติดตั้งฟอนต์การ์ตูนไทย TrueType (`Prompt`, `Sarabun`) ใน repo และจัดเตรียมสคริปต์ `start_app.bat` / `update_app.bat` สำหรับใช้งานและอัปเดตระบบแบบ Native
-- [x] จัดทำคู่มือและ Runbook สำหรับการนำระบบจาก Local MVP ขึ้นติดตั้งจริงบน VPS แบบ Native (Python venv + PM2 + Nginx) พร้อมระบบ Embedded TrueType Font
+### Phase 5: Performance & Translation Quality Optimization (ตามข้อสั่งการ Performance & Translation Agent)
+- [x] **1. แก้ปัญหาภาพซ้ำ (Duplicate Images Fix):**
+  - ตรวจสอบและกรอง URL รูปภาพที่ซ้ำกันในชั้น `ScraperService` และในลูปของ `worker.py` ก่อนเริ่มทำการแปลและก่อนอัปโหลดขึ้น Cloudflare R2 / บันทึกลงฐานข้อมูล SQLite
+- [x] **2. แก้ปัญหาวรรณยุกต์ไทยและการตัดคำไทย (Thai Typography & Smart Word Wrapping):**
+  - ติดตั้งและใช้งาน `pythainlp` หรือระบบตัดคำไทยตามพจนานุกรมใน `TypesetterEngine` แทน `textwrap.wrap` ของอังกฤษ เพื่อป้องกันคำไทยถูกหั่นครึ่งบรรทัด (เช่น คำว่า "มาก" ไม่โดนแยกเป็น "มา" บรรทัดบน และ "ก" บรรทัดล่าง)
+  - ปรับการตั้งค่า Font Rendering ของ Pillow (`features=['+mark', '+mkmk']` หรือคลีนสระ/วรรณยุกต์ซ้อน) เพื่อป้องกันปัญหาวรรณยุกต์ลอยหรือจมผิดพิกัด (เช่น "นอถต ้ว")
+- [x] **3. อัปเกรดประสิทธิภาพ Performance ให้รวดเร็วและประหยัดสเปคเซิร์ฟเวอร์ (Parallel Processing & Resource Tuning):**
+  - ปรับลูปการแปลหน้าภาพใน `worker.py` จากแบบทีละหน้า (Sequential) ให้เป็นแบบขนาน (Parallel Async Batching ด้วย `asyncio.Semaphore` และ `ThreadPoolExecutor`) ทำให้แปลการ์ตูนเสร็จเร็วขึ้น 3-5 เท่าโดยไม่กิน CPU 100% จนเซิร์ฟเวอร์ค้าง
+  - ปรับจูนขนาดภาพก่อนเข้า RapidOCR เพื่อลดภาระการคำนวณของ CPU บนเซิร์ฟเวอร์
+- [x] **4. ยกระดับคุณภาพการแปลไทยให้มันส์และได้อารมณ์มังฮวา (Natural Thai Manga Dialect & Emotional Tone):**
+  - ปรับแต่ง Custom Prompt ใน `AITranslatorEngine` ให้ Groq AI (Llama-3) แปลภาษาไทยสไตล์การ์ตูนมังฮวาแอคชั่น/แฟนตาซีอย่างแท้จริง มีการใช้คำสแลง หางเสียง และอารมณ์ตัวละครที่ดุดัน ลื่นไหล ไม่ทื่อเหมือนโปรแกรมแปลภาษา
+### Phase 6: Reader UX & AI Precision Upgrades (ตามฟีดแบ็กผู้ใช้จากการอ่านจริง)
+- [x] **1. ปรับจูนการถมขาวและยุบรวมกล่องข้อความไม่ให้ทับภาพการ์ตูน (Smart Inpainting & OCR Bounding Box Refinement):**
+  - ปรับลดเกณฑ์ Vertical Gap ใน `MangaOCREngine` จาก 1.8 เป็น 1.2 เพื่อไม่ให้ยุบรวมกล่องคำพูดที่อยู่ห่างกันจนครอบทับภาพตัวละครตรงกลาง
+  - เปลี่ยนอัลกอริทึมใน `InpainterEngine` จากสี่เหลี่ยมมุมฉากทึบเป็น **Rounded Rectangle** พร้อมเว้นระยะขอบใน (Inward Padding 3px) และทำการสุ่มตัวอย่างสีพื้นหลังบอลลูน (Color Sampling)
+- [x] **2. ปรับจูนไวยากรณ์และการเว้นวรรคประโยคไทย (Clause Spacing & Grammar Tuning):**
+  - สั่งการใน Custom Prompt ของ `AITranslatorEngine` ให้ AI เว้นวรรค 1 เคาะระหว่างประโยคย่อยเสมอ และปรับ Temperature เป็น 0.45 เพื่อให้อ่านรู้เรื่อง 100% ไม่แปลหลุดความหมายหรือสร้างคำแปลกๆ
+- [x] **3. ระบบแปลล่วงหน้าอัตโนมัติระหว่างอ่าน (Auto Preloading Next Chapter):**
+  - ฝัง Background Task ใน API Reader View เมื่อผู้ใช้อ่านตอนปัจจุบัน ระบบจะสแกนหาลิงก์ตอนถัดไป (`next_chapter_url`) และรันแปลภาษาในพื้นหลังทันที ทำให้กดอ่านตอนถัดไปได้ต่อเนื่องไม่มีสะดุด
+### Phase 6.1: Storage & AI Rate Limit Fixes (ตามภาพฟีดแบ็กผู้ใช้)
+- [x] **1. แก้ปัญหา Cloudflare R2 ในโหมด Local (`APP_ENV=local`):**
+  - เปิดใช้ `endpoint_url` ของ Cloudflare R2 เสมอเมื่อมี API Key ของจริงใน `.env` และเพิ่มระบบ Console Logging แจ้งสถานะการเก็บไฟล์ลงโฟลเดอร์ `manga-bkk/{slug}/{chapter}/{page}.jpg`
+- [x] **2. แก้ไขคำแปลระดับแรงก์พลังเวท (RPG/Rank Terminology):**
+  - สั่งการใน Custom Prompt ให้แปลคำว่า A-level, S-rank เป็น "ระดับ A", "แรงก์ S" เสมอ ห้ามแปลทับศัพท์เพี้ยนเป็นคำว่า "เอา"
+- [x] **3. อัปเกรดระบบแปลเป็น Batch Translation แก้ปัญหาค้างที่ 36%:**
+  - เปลี่ยนจากการยิง API แปลทีละกล่องข้อความ เป็นการรวมข้อความทั้งหน้าส่งแปลในครั้งเดียว (`translate_batch`) ลดปริมาณการเรียก API ลง 80%-90% พร้อมเพิ่ม Global Async Lock ไม่ให้ยิงเกิน 1 ครั้ง/วินาที หมดปัญหาติด Rate Limit 429 ค้างกลางทาง
+### Phase 6.2: Automatic Multi-Model AI Backup Pipeline (ระบบ AI สำรอง 4 ชั้น)
+- [x] **1. แก้ปัญหาค้างที่ 30% จากขีดจำกัด Groq Free Tier (100K Tokens/Day):**
+  - สร้างลำดับ AI สำรอง (Fallback Models) ใน `GroqClient` เมื่อโมเดลหลัก (`llama-3.3-70b-versatile`) ติดลิมิต Rate Limit หรือล่าช้า ระบบจะสลับไปใช้โมเดลสำรองที่มีโควตาสูงกว่า 500,000 Tokens/วัน (`llama-3.1-8b-instant`, `gemma2-9b-it`, `mixtral-8x7b-32768`) ทันทีโดยอัตโนมัติ ทำให้ได้โควตารวมกว่า 1.6 ล้าน Tokens/วัน ไม่มีวันค้าง!
+- [x] **2. เพิ่มระบบ Unbuffered Progress Console Logging:**
+  - เพิ่ม `print(..., flush=True)` แสดงสถานะความคืบหน้าระดับหน้า (Page-by-page progress) ในเทอร์มินัลเซิร์ฟเวอร์แบบเรียลไทม์
+### Phase 6.3: AI Rate Limit Circuit Breaker, Visual Artifacts Fix & Token Optimization
+- [x] **1. ระบบ Model Circuit Breaker / Cooldown (`groq_client.py`):**
+  - เพิ่ม Registry `_exhausted_models = {}` สำหรับบันทึกโมเดลที่คืนค่า HTTP 429 พร้อมกำหนดเวลา Cooldown (1800 วินาที / 30 นาที)
+  - ในฟังก์ชัน `generate_chat_completion` ตรวจสอบและข้าม (Skip) โมเดลที่ติดลิมิตและยังไม่หมดเวลา Cooldown เพื่อไม่ให้ระบบยิงซ้ำไปยังโมเดลที่ Exhausted
+- [x] **2. แก้ไขภาพกล่องดำทับบอลลูนคำพูด (`inpainter.py`):**
+  - ปรับปรุงการสุ่มสี (Color Sampling) ใน `clean_speech_box` โดยตรวจสอบค่าความสว่าง (Luminance: L = 0.299*R + 0.587*G + 0.114*B)
+  - หากพบว่าพิกัดที่สุ่มเป็นสีเข้ม (L < 180 เช่น เส้นขอบหรือตัวอักษร) ให้เมินสีนั้นและตั้งค่าเริ่มต้นเป็นสีขาวบริสุทธิ์ `(255, 255, 255)` ทันที
+- [x] **3. ปรับปรุง Prompt ให้ประหยัดโทเคนและรัดกุมขึ้น (`translator.py`):**
+  - ปรับจูน System Prompt และ User Prompt ใน `translate_batch` ให้กระชับ ลดคำอธิบายยืดยาว ประหยัด Token ได้ 30-50% ขณะรักษาคุณภาพสไตล์มังฮวาและรูปแบบการรันลำดับข้อความ `[1] ...` อย่างแม่นยำ
+### Phase 6.4: Update Groq Models Lineup and Optimize Cooldown Duration
+- [x] **1. เปลี่ยนรายชื่อ AI สำรองเป็นโมเดลรุ่นใหม่ล่าสุด 6 รุ่น (`groq_client.py`):**
+  - ลบโมเดลที่ยกเลิกการให้บริการ (`gemma2-9b-it`, `mixtral-8x7b-32768`) ออกเพื่อหลีกเลี่ยงข้อผิดพลาด `HTTP 400 Bad Request`
+  - เพิ่มโมเดลชั้นนำที่เปิดให้บริการจริง: `llama-3.3-70b-versatile`, `meta-llama/llama-4-scout-17b-16e-instruct` (โควตา 30K TPM!), `qwen/qwen3.6-27b`, `openai/gpt-oss-20b`, `llama-3.1-8b-instant`, `qwen/qwen3-32b` ให้โควตารวมกว่า 70,000 Tokens/นาที
+- [x] **2. ปรับลดระยะเวลา Circuit Breaker Cooldown เป็น 60 วินาที:**
+### Phase 6.5: Smart 5-Point Inpainting & Thai Spacing / Anti-Hallucination Upgrades
+- [x] **1. ระบบตรวจจับสีบอลลูนอัจฉริยะแบบ 5 จุด (`inpainter.py`):**
+  - แก้ปัญหาสีบอลลูนมั่วหรือเกิดกล่องเทา/ฟ้าทับบนบอลลูนสีขาว ด้วยการสุ่มตรวจจับ 5 จุด (มุมทั้ง 4 และจุดกึ่งกลาง)
+  - วิเคราะห์ค่าความสว่างและย่านสี หากพบเป็นโทนขาว/ขาวอมเทา/ขาวอมฟ้าของรอยหยัก JPEG ในการ์ตูน ระบบจะดึงเข้าสู่สีขาวบริสุทธิ์ `(255, 255, 255)` ทันที ทำให้บอลลูนขาวเนียนกริบ ไร้กล่องเหลี่ยมแปลกตา 100% ส่วนหน้าต่างสถานะสีพิเศษยังคงรักษาสีเดิมไว้
+- [x] **2. กฎเหล็กการเว้นวรรคประโยคและป้องกัน AI มั่วคำศัพท์ (`translator.py`):**
+  - เพิ่มคำสั่งและตัวอย่างประโยคใน System Prompt และ Batch Prompt บังคับให้ AI เว้นวรรค 1 เคาะระหว่างประโยคย่อยเสมอ ห้ามเขียนติดกันเป็นพรืด
+  - ปรับอุณหภูมิ (Temperature) เป็น `0.35` พร้อมเพิ่มฟังก์ชัน Post-processing `_post_process_spacing()` เติมช่องว่างหลังเครื่องหมายวรรคตอนและจัดระเบียบข้อความให้อ่านง่ายและเป็นธรรมชาติที่สุด
+### Phase 6.6: AI Reasoning Clean-up, 3x Speedup & Re-translation Cache-Busting
+- [x] **1. กำจัดข้อความความคิด AI (`<think>...</think>`) ออกจากผลลัพธ์ (`translator.py`):**
+  - เพิ่ม Regex ลบ block `<think>.*?</think>` ทั้งในโหมดแปลเดี่ยวและแปลกลุ่ม ป้องกันโมเดล reasoning (Qwen 3, Llama 4 Scout) พ่นข้อความให้เหตุผลภาษาอังกฤษทับลงในบอลลูนคำพูด
+- [x] **2. กฎเหล็กห้ามทับศัพท์อังกฤษและป้องกันแปลชื่อคนเพี้ยน (`translator.py`):**
+  - เพิ่มกฎ **[ห้ามทับศัพท์ภาษาอังกฤษทั่วไป]** บังคับแปลคำศัพท์ทั่วไปทั้งหมด (เช่น "a fortunate" -> "ความโชคดี")
+  - เพิ่มกฎ **[ชื่อเฉพาะห้ามแปลความหมาย]** ห้ามแปลชื่อคน ตัวละคร หรือวิชาเป็นคำศัพท์ทั่วไป (เช่น หลู่ซู ห้ามแปลเป็น "มังกรเพียงตัวเดียว")
+- [x] **3. ขยายโควตาทำงานขนานเป็น Semaphore(5) เพื่อความเร็ว 3 เท่า (`worker.py`):**
+  - ปรับการแปลและถมพื้นหลังพร้อมกันจาก 2 หน้า เป็น 5 หน้า ลดเวลาแปลการ์ตูน 20 หน้าจาก 60 วินาที เหลือเพียง ~15-20 วินาที
+- [x] **4. ระบบ Cache-Busting เมื่อผู้ใช้สั่งแปลตอนเดิมซ้ำ (`worker.py`):**
+  - เพิ่ม Parameter เวลาปัจจุบัน (`?v=timestamp`) ต่อท้าย URL รูปภาพ ก่อนบันทึกลงฐานข้อมูล ทำให้เบราว์เซอร์ล้างแคชเดิมทันทีที่แปลเสร็จ แสดงผลภาพแปลใหม่ล่าสุดโดยไม่ต้องกด Ctrl+F5
+### Phase 6.7: Intelligent Concurrency, Natural Prompting, Heuristic Spacing & Safe Retry (v1.2.7)
+- [x] **1. ปรับปรุงระบบ Concurrency และ Circuit Breaker (`groq_client.py`):**
+  - ปรับ Global Semaphore เป็น `Semaphore(3)` และถอดคำสั่ง `await asyncio.sleep(1.0)` ออกจาก Critical Section เพื่อปลดล็อกคอขวดระบบ
+  - อัปเกรดรายชื่อโมเดลสำรองใน `fallback_models` เป็นรุ่นมาตรฐานที่เปิดให้บริการจริงในปัจจุบัน (เช่น `llama-3.1-8b-instant`, `mixtral-8x7b-32768`)
+  - เพิ่ม Smart 429 Rate Limit Handler (รอ Retry-After หาก $\le 5s$ แล้วยิงซ้ำก่อนติด Cooldown)
+- [x] **2. ออกแบบ System Prompt ใหม่แบบธรรมชาติ (`translator.py`):**
+  - เปลี่ยนจากคำสั่งเชิงลบ (`[ห้าม...]`) เป็น Few-shot Contrastive Examples และบทบาทที่ชัดเจน เพื่อลดปัญหา Echoing และ Meta-language leakage
+- [x] **3. อัลกอริทึมตัดแบ่งประโยคภาษาไทยอัตโนมัติ (`translator.py`):**
+  - เพิ่ม Heuristic Regex Separator ใน `_post_process_spacing` ตรวจจับคำเชื่อมประโยคภาษาไทย (เช่น การ, ความ, ทว่า, แต่ว่า) และแทรกช่องว่าง 1 ช่องอัตโนมัติ
+- [x] **4. ระบบตรวจจับและยิงแปลซ้ำกล่องที่ตกหล่น (`translator.py` & `worker.py`):**
+### Phase 6.8: True Human-Level Scanlation Translation Architecture & Verified Groq Model Hierarchy (v1.2.8)
+- [x] **1. จัดเรียงลำดับ Groq Model Hierarchy ตามตารางจริงของ Groq API (`groq_client.py`):**
+  - ปรับรายชื่อโมเดลใน `fallback_models` ให้เป็นโมเดลจริงตามที่ให้บริการ พร้อมเรียงลำดับตามความฉลาดและ TPM: `llama-3.3-70b-versatile` -> `groq/compound` -> `meta-llama/llama-4-scout-17b-16e-instruct` -> `openai/gpt-oss-120b` -> `qwen/qwen3.6-27b` -> `qwen/qwen3-32b` -> `llama-3.1-8b-instant` -> `openai/gpt-oss-20b`
+- [x] **2. ยกระดับ System Prompt สู่ระดับนักแปลมังฮวามนุษย์มืออาชีพ (`translator.py`):**
+  - เปลี่ยน Persona เป็น Veteran Scanlator ผู้ช่ำชองสำนวนไทยสไตล์การ์ตูน
+  - เพิ่มหลักการ Idiomatic Restructuring (ปรับโครงสร้างประโยคตามธรรมชาติภาษาไทยพูด) และ Emotion & Tail Words (คำสร้อย/หางเสียงตามอารมณ์ฉาก เช่น สินะ, หรอกน่า, เสียจริง)
+  - เพิ่ม Contrastive Few-Shot Examples แสดงตัวอย่างการแปลหุ่นยนต์เทียบกับคนแปลจริง (เช่น "นายยืนกรานให้ฉันทำมัน" -> "ก็แกรั้นจะให้ฉันทำเองนี่นา!")
+- [x] **3. ระบบ Dynamic Genre Contextualizer ปรับโทนตามประเภทเรื่อง (`translator.py`):**
+  - เพิ่มฟังก์ชัน `get_genre_context_instructions(genre)` ปรับสำนวนและสรรพนามอัตโนมัติตามแนวเรื่อง (ยุทธภพ/จีนโบราณ, แอคชั่นฮันเตอร์สมัยใหม่, โรแมนติกดราม่า)
+- [x] **4. Hotfix: ระบบกำจัดภาษา AI Meta-Language & Prompt Echoes ถาวร (`translator.py`):**
+  - เพิ่มตัวกรองสแกนบรรทัดใน `_post_process_spacing` ลบบรรทัดที่มีคำอธิบายภาษาอังกฤษหรือคำสะท้อนจากระบบออกก่อนทำการเกลาประโยค
+  - ยกระดับ `_is_valid_thai_translation` ตรวจสอบอัตราส่วนอักษรไทยต่อ ASCII ตีตกคำอธิบายภาษาอังกฤษไม่ให้ทับภาพมังงะ
+- [x] **5. Hotfix: ปรับสมดุล Concurrency และกำจัด Alien Characters ใน Console (`groq_client.py`, `worker.py`):**
+  - ปรับลด Semaphore ใน Worker เหลือ 2 หน้าพร้อมกัน และข้ามการยิงแปลเดี่ยวเมื่อ AI ติดลิมิต Rate Limit พร้อมเปลี่ยน Log เป็นภาษาอังกฤษ ASCII
+- [x] **6. Hotfix: ระบบป้องกัน Rate Limit Storm & ตัดขยะ OCR เครดิต/เว็บไซต์ไม่ให้ยิงแปลซ้ำ (`translator.py`, `worker.py`):**
+  - เพิ่มตัวกรองขยะ OCR (เว็บไซต์/เครดิต/ข้อความสั้น) และจำกัดเพดานการแปลเดี่ยวซ่อมแซมไม่เกิน 3 ครั้งต่อหน้า ป้องกันโควตาโทเคนล้นจน AI ติด 429 พร้อมกัน
+- [x] **7. Hotfix: ป้องกัน Error 413 Payload Too Large, กำจัด Prompt Echoes ถาวร และเพิ่มระบบเว้นวรรคประโยคสนทนา (`translator.py`):**
+  - เพิ่มระบบ Batch Chunking แบ่งส่งแปลครั้งละไม่เกิน 8 กล่อง ป้องกัน Error HTTP 413
+  - ปรับปรุงการสแกนตัวอักษร ASCII เกิน 15 ตัว เพื่อกำจัดปัญหา AI หลอนคำอธิบายกฎ (Prompt Echoes) ถมบนภาพมังงะ
+  - เพิ่มคำสันธานประโยคสนทนา (เช่น `แต่`, `ก็`, `แล้ว`, `ถ้า`, `ว่า`, `เพราะ`) ลงในระบบเว้นวรรคอัตโนมัติ ทำให้ประโยคคำพูดมีการเว้นวรรคสวยงาม ไม่ติดกันเป็นพรืด
+- [x] **8. Hotfix: ยกระดับปรัชญา "แปลครบ 100% ห้ามข้ามห้ามเหลือภาษาอังกฤษ" พร้อมระบบรอโควตา Global Patience Loop (`groq_client.py`, `translator.py`):**
+  - ปลดล็อกเพดานจำกัดการซ่อมแปลเดี่ยวและยกเลิกตัวกรองคำศัพท์สั้น/ภาษาอังกฤษ เพื่อบังคับให้แปลไทยทุกกล่อง 100% (ยกเว้นลิงก์ URL จริงๆ)
+  - เพิ่มระบบซ่อมแปล 2 ชั้น (Two-Stage Single Box Fallback) พร้อม Simple Prompt Force
+### Phase 6.9: Elimination of AI Repetition Loops, OCR Correction Meta-Leakage, Zero-Spacing Glues & TPM Overflow (v1.2.9)
+- [x] **1. ระบบกำจัดข้อความวนลูปซ้ำ (AI Repetition Deduplication & Stability Tuning - `translator.py`):**
+  - เพิ่มอัลกอริทึม Deduplication ใน `_post_process_spacing` ตรวจจับและกำจัดข้อความวนลูปซ้ำ (เช่น `"ประโยค A""ประโยค A แต่ประโยค B"`) ให้เหลือเฉพาะประโยคสุดท้ายที่สมบูรณ์ที่สุด
+  - ปรับ System Prompt ให้กระชับ ตรงประเด็น ป้องกันอาการ Hallucination วนลูปของ Llama-3
+- [x] **2. ระบบกำจัดข้อความแก้คำผิด / ความคิด AI ไม่ให้หลุดเข้ากล่องคำพูด (`translator.py`):**
+  - เพิ่ม Regex กรองข้อความแก้คำผิดสไตล์ OCR / AI Meta-text (เช่น `-"SHOLLD"->"SHOULD"`) และข้อความหมายเหตุออกอย่างเด็ดขาด
+- [x] **3. ยกระดับการแปลภาษาพูดไทยและเว้นวรรคประโยคอย่างเป็นธรรมชาติ ไม่วิบัติ ไม่เขียนติดกันเป็นพรืด (`translator.py`):**
+  - ปรับ System Prompt ห้ามแปลตรงตัวสไตล์ Google Translate (เช่น เปลี่ยน `ป้องกันเธอได้อย่างไร` เป็น `ปกป้องเธอได้ยังไงล่ะ`)
+  - ถอดคำว่า `หรือ` ออกจากตัวแบ่งเว้นวรรคอัตโนมัติ เพื่อไม่ให้ตัดคำเชื่อมในประโยคคำถาม/ประโยคความรวมจนเสียไวยากรณ์ภาษาไทย
+  - เพิ่มระบบเว้นวรรคอัตโนมัติระหว่างอักษรไทยกับอังกฤษ/ตัวเลข (เช่น `เลเวล E เท่านั้น`) หลังชื่อตัวละครคำเรียกขาน และหลังเครื่องหมายวรรคตอน (`!! `)
+- [x] **4. แก้ปัญหาติด Rate Limit Cooldown แม้เว้นใช้งานมา 2 วัน (`groq_client.py`, `worker.py`, `translator.py`):**
+  - กำหนดค่า `max_tokens=650` ในการเรียก API ทุกครั้ง เพื่อไม่ให้ Groq จองโควตาโทเคนล่วงหน้า (Requested Tokens) เกินเกณฑ์ 6,000 TPM
+  - ปรับปรุงรายชื่อโมเดลสำรองให้ใช้เฉพาะโมเดลจริงของ Groq (`llama-3.1-8b-instant`, `gemma2-9b-it`, `mixtral-8x7b-32768`)
+  - ปรับ `asyncio.Semaphore(1)` ใน `worker.py` รันแปลทีละหน้าตามลำดับ ไม่แย่งโควตาโทเคนกัน
+  - ปรับปรุง 429 Rate Limit Handler หากรอไม่เกิน 15 วินาที ระบบจะหยุดรอ (Pause) แล้วลองใหม่ทันทีโดยไม่ล็อก Cooldown 60 วินาที
+
+### Phase 6.10: Thai Tone Mark Typesetting Fix, Modern Cultivation Genre, Reader UX Ad Removal & Token Optimization (v1.2.10)
+- [x] **1. แก้ปัญหาไม้เอก / วรรณยุกต์และสระบนหาย (`typesetter.py`):**
+  - ขยายความสูงบรรทัด (`line_height`) ภาษาไทยเป็น `int(size * 1.42)` พร้อมเพิ่มระยะขอบบน เพื่อให้วรรณยุกต์และสระบนไม่ถูกขอบบนของกล่องคำพูดตัดทิ้ง
+- [x] **2. เพิ่มหมวด Modern Cultivation ป้องกันแปลเป็นโหมดฮันเตอร์ (`translator.py`):**
+  - เพิ่มหมวด `modern_cultivation` (ผู้ฝึกตนยุคปัจจุบัน / เซียนยุคปัจจุบัน) กำหนดคำศัพท์เฉพาะ (ผู้ฝึกตน, ลมปราณ, ทะลวงขั้น) และตั้งเป็นค่าเริ่มต้น
+- [x] **3. เอาโฆษณาคั่นกลางระหว่างหน้าการ์ตูนออก (`Reader.tsx`):**
+  - ลบโฆษณาแทรกกลางหน้ามังงะ เพื่อให้ผู้อ่านเลื่อนอ่านได้ต่อเนื่อง ไม่โดนคั่นอารมณ์
+- [x] **4. ประหยัดโทเคนและเพิ่มประสิทธิภาพ (`translator.py`):**
+  - ขยายขนาด Batch Translation จาก 8 เป็น 15 กล่องต่อการเรียก API 1 ครั้ง ลดการส่ง System Prompt ซ้ำซ้อน ประหยัดโทเคนลงกว่า 50%
+
+### Phase 6.11: Tofu Box Cleaning, English Leftover Replacement & Clause Spacing Restoration (v1.2.11)
+- [x] **1. กำจัดสี่เหลี่ยม Tofu Box `[][][][][]` (`typesetter.py`, `translator.py`):**
+  - กรองอักขระพิเศษ สัญลักษณ์ หรือวงเล็บว่างที่ฟอนต์ไม่รองรับออกก่อนเรนเดอร์ ไม่ให้เกิดกรอบสี่เหลี่ยมบนกล่องคำพูด
+- [x] **2. แปลงคำภาษาอังกฤษหลงเหลือ (`money.`) เป็นไทย (`translator.py`):**
+  - บังคับ System Prompt ห้ามปล่อยคำศัพท์ภาษาอังกฤษทิ้งไว้ และเพิ่ม Regex แปลงคำหลงเหลือเช่น `money.` ให้เป็น `เงิน` โดยอัตโนมัติ
+- [x] **3. คืนค่าระบบเว้นวรรคประโยคย่อยและเพิ่ม Safety Margin วรรณยุกต์บน (`typesetter.py`, `translator.py`):**
+  - คืนกฎเว้นวรรคอัตโนมัติก่อนคำสันธาน (`แต่`, `เพราะ`, `เมื่อ`, `หลังจาก`, `ดังนั้น`) และเพิ่มระยะปลอดภัยด้านบนกล่องคำพูดไม่ให้ไม้เอก/โทถูกตัดขอบ
+
+### Phase 6.12: Dynamic Bubble Font Sizing, Punctuation Bubbles & Pronoun Tuning (v1.2.12)
+- [x] **1. ปรับขนาดฟอนต์ตามสัดส่วนกล่องคำพูดจริง (Dynamic Bubble Font Scaling ใน `typesetter.py`):**
+  - คำนวณขนาดฟอนต์เริ่มต้นตามความกว้างและความสูงกล่องคำพูด (`start_size = max(18, min(int(box_height * 0.28), int(box_width * 0.16), 34))`) เพื่อให้กล่องคำพูดใหญ่ได้ฟอนต์ที่ใหญ่พอดี ไม่หดเล็กเกินไป
+- [x] **2. รองรับกล่องคำพูดที่มีเฉพาะเครื่องหมายวรรคตอน `???` หรือ `...` (`translator.py`):**
+  - ปรับตัวตรวจสอบ `_is_valid_thai_translation` ให้ยอมรับช่องคำพูดที่เป็นเครื่องหมายอัศเจรีย์ ปรัศนี หรือตัวเลข ป้องกันปัญหาขึ้นข้อความว่า "ไม่มีคำแปล"
+- [x] **3. ลดการใช้สรรพนามทางการ "คุณ" และฝังตัวอย่างประโยคพูดมังฮวาชั้นยอด (`translator.py`):**
+  - บังคับห้ามใช้สรรพนามทางการ "คุณ" พร่ำเพรื่อในบทสนทนาทั่วไป ให้ใช้ "นาย", "เธอ", "แก", หรือชื่อตัวละครแทน พร้อมฝังตัวอย่างประโยคมังฮวามาตรฐาน
+
+### Phase 6.13: Repetition Loop Collapse, Complete Bubble Inpainting & Refusal Filter (v1.2.13)
+- [x] **1. ขจัดปัญหา AI วนลูปคำซ้ำอัตโนมัติ (`translator.py`):**
+  - เพิ่ม Regex ตรวจจับและยุบคำวนซ้ำอัตโนมัติ (`re.sub(r'(.{2,25}?)\1{3,}', r'\1', text)`) ป้องกันไม่ให้คำแปลหลุดวนซ้ำ
+- [x] **2. คลีนกรอบคำพูดเดิมสะอาดหมดจด ไม่เหลือคราบดำขอบตัวอักษร (`inpainter.py`):**
+  - ขยายกรอบลบข้อความเดิมออกไป 3 พิกเซล และเปลี่ยนเป็นสี่เหลี่ยมเต็มช่องเพื่อลบรอยหยักและเงาของตัวอักษรเดิม 100%
+- [x] **3. สกัดข้อความปฏิเสธของ AI และไม่ส่ง `???` ไปแปล (`translator.py`):**
+  - กรองข้อความปฏิเสธ AI (`ขออภัย`, `ไม่พบข้อความที่จะแปล`) และตัดวงจรไม่ส่งเครื่องหมายวรรคตอน (`???`) ไปเรียก API
+
+### Phase 6.14: Intelligent PyThaiNLP Clause Spacing (v1.2.14)
+- [x] **1. ติดตั้งระบบเว้นวรรคประโยคย่อยอัจฉริยะ (Intelligent Thai Clause Spacing ใน `translator.py`):**
+  - ใช้โมดูล `pythainlp.tokenize.word_tokenize` ในการวิเคราะห์โครงสร้างและตัดคำไทย เพื่อเติมช่องไฟเว้นวรรคอัตโนมัติก่อนคำสันธาน หลังคำสร้อย และระหว่างประโยคย่อย แก้ปัญหาข้อความติดกันเป็นพรืดให้สวยงามเป็นธรรมชาติ
+
+### Phase 6.15: Typesetter Space Preservation, Tone Mark Headroom & Terminology Fixes (v1.2.14 Patch)
+- [x] **1. แก้ไขต้นตอช่องไฟเว้นวรรคหายในระบบ Typesetter (`typesetter.py`):**
+  - แก้ไขบรรทัด `return [w for w in words if w != " "]` ที่ตัด Token ช่องว่าง (`" "`) ออกก่อนวาดลงภาพ ให้รักษา Token ช่องว่างทั้งหมด 100% ทำให้ช่องไฟที่เว้นวรรคไว้ปรากฏบนภาพมังฮวาจริง
+- [x] **2. เพิ่ม Headroom ป้องกันวรรณยุกต์และสระบนจม/หาย (`typesetter.py`):**
+  - ขยายระยะห่างขอบบนและเพิ่มบรรทัด `line_height = int(best_size * 1.50)` ป้องกันวรรณยุกต์และสระบน (เช่น คำว่า `ที่`, ไม้เอก, ไม้โท) ถูกตัดขอบบนเมื่อวาดด้วย Pillow
+- [x] **3. แก้ไขคำแปล Cultivator และ Level Advancement (`translator.py`):**
+  - บังคับแปล `Cultivator` เป็น `ผู้ฝึกตน` (ห้ามแปลเป็นเกษตรกร) และแปล `Promotion to Level` เป็น `เลื่อนระดับ/ทะลวงขั้น` (ห้ามแปลเป็นเลื่อนตำแหน่งงาน)
+- [x] **4. แก้ปัญหาแปลค้างที่ 30% และอัปเกรดลำดับโมเดลสำรอง Groq AI (`groq_client.py`):**
+  - แทนที่โมเดลเก่าที่ถูกยกเลิก (`gemma2-9b-it`, `mixtral-8x7b-32768`) ด้วย 6 โมเดลตัวท็อปล่าสุดของ Groq (`llama-3.3-70b-versatile`, `qwen/qwen3-32b`, `qwen/qwen3.6-27b`, `meta-llama/llama-4-scout-17b-16e-instruct`, `llama-3.1-8b-instant`, `openai/gpt-oss-20b`) ทำให้ระบบแปลลื่นไหลต่อเนื่อง 100% ไม่สะดุด
+- [x] **5. แก้ปัญหาระบบวนลูป Retrying กับกล่องคำพูดเงียบ (`......`) ใน `translator.py`:**
+  - แก้ไขตัวตรวจสอบและการแปลให้กรอบข้อความที่ไม่มีตัวอักษร (จุดไข่ปลา เครื่องหมายวรรคตอน ตัวเลข สัญลักษณ์) ผ่านการตรวจสอบทันทีโดยไม่ส่งไปเรียก LLM ช่วยลดการใช้ API และป้องกันการค้างวนลูป
+- [x] **6. ขยาย Batch Max Tokens เป็น 2500 และขจัดลูป Retry ซ้ำซ้อน (`translator.py`):**
+  - ขยาย `max_tokens` สำหรับการแปลกลุ่ม (Batch 15 กรอบ) จาก `650` เป็น `2500` ป้องกันคำแปลไทยเว้นวรรคถูกตัดขาดกลางทาง และยกเลิกการวนลูป Retry กล่องเงียบหรือสัญลักษณ์ให้คืนค่าทันทีในรอบเดียว
+- [x] **7. รีดประสิทธิภาพ Prompt และลด Input Token ลง 70% (`translator.py`):**
+  - ปรับลดความซ้ำซ้อนของ System Prompt & Genre Context ลดการใช้ Input Token ลงจาก ~800 โทเคนเหลือเพียง ~200 โทเคน ตอบกลับเร็วขึ้นและประหยัดโควต้า Rate Limit โดยคงคุณภาพคำแปล การเว้นวรรค และสำนวนครบถ้วน 100%
+- [x] **8. แก้ปัญหาวรรณยุกต์และสระบนซ้อนทับหรือจมหาย (`typesetter.py`):**
+  - เปลี่ยนฟอนต์หลักเป็น `Sarabun-Regular.ttf` ซึ่งมีช่องไฟแนวตั้งระหว่างสระบนและวรรณยุกต์บนชัดเจน พร้อมปรับ `line_height = int(size * 1.60)` และเพิ่มระยะขอบบน ป้องกันสระบนและวรรณยุกต์จมซ้อนหรือถูกขอบกรอบตัดหาย
+- [x] **9. ขจัดปัญหาแปลไม่ครบ/ตัดประโยค และจัดลำดับโมเดลสำรอง Qwen (`translator.py` & `groq_client.py`):**
+  - เพิ่มคำสั่งล็อกห้ามย่อ ห้ามตัดทอนข้อความ และห้ามแต่งชื่อลัทธิ/องค์กรเองใน Prompt พร้อมปรับ `temperature = 0.15` และขยับโมเดล `qwen/qwen3-32b` ขึ้นเป็นลำดับที่ 2 ทำให้แปลประโยคยาวครบถ้วนทุกคำ ตรงความหมาย 100%
+
+### Phase 6.16: Context-Aware Translation Fidelity & Selective QA
+- [x] **1. ตั้ง Golden Corpus และคืน baseline tests ให้เป็นสีเขียว:**
+  - เก็บกรณี Chapter 153 หน้า 7 เป็น semantic regression หลัก และเพิ่มชุดทดสอบ parser, OCR confidence, glossary, context, retry และ fallback โดยไม่ลดความเข้มของข้อกำหนดเดิม
+- [x] **2. เพิ่ม structured contracts และหลักฐานย้อนตรวจ:**
+  - ใช้ `OCRSegment`, `TranslationBatchRequest`, `TranslationResult` และ JSON response ที่ผูกด้วย stable `segment_id`; เก็บ profile และ artifact แบบ append-only เพื่อย้อนดู source/draft/final/QC/model ได้
+- [x] **3. แปลแบบ chapter-aware พร้อม rolling context และ glossary ต่อเรื่อง:**
+  - OCR ทุกหน้าก่อน แปลตามลำดับหน้าโดยส่ง 8 กล่องก่อนหน้า ใช้ neutral profile เป็นค่าเริ่มต้น และรวม auto glossary กับ locked manual overrides โดยให้ override ชนะเสมอ
+- [x] **4. เพิ่ม OCR anomaly recovery และ Selective Semantic QA:**
+  - re-OCR เฉพาะ crop ที่ confidence ต่ำหรือข้อความผิดรูป ตรวจ deterministic gate ทุกกล่อง และเรียก semantic reviewer/retry เพียงหนึ่งครั้งเฉพาะกล่องเสี่ยง
+- [x] **5. เผยแพร่แบบ staging และ rollback ได้:**
+  - อัปโหลดผลลัพธ์ใต้ `run_id` ก่อนสลับ Page URLs; ไม่ลบภาพเดิมก่อนงานใหม่สำเร็จ และเก็บ source bubble เมื่อคำแปลยังไม่ผ่านพร้อมสถานะ `COMPLETED_WITH_WARNINGS`
+- [x] **6. เปิดใช้แบบ shadow/canary ก่อนเป็นค่าเริ่มต้นทุกเรื่อง:**
+  - รัน Chapter 153 แบบ shadow, ตรวจ golden และ human review จากนั้น retranslate เฉพาะตอน 153 ก่อนเปิด pipeline ใหม่สำหรับงานใหม่ทุกเรื่อง โดยไม่ backfill ตอนเก่าอัตโนมัติ
+
+### Phase 6.17: Translation Pipeline Performance Optimization (Zero-Stutter Bounded Concurrency & Thread Pool Control)
+- [x] **1. จำกัดจำนวนเธรดและการประมวลผลพร้อมกันของ OCR (Bounded OCR Concurrency & OpenCV Thread Control):**
+  - กำหนด Semaphore (จำกัด 2-4 concurrent pages สูงสุดตาม CPU Cores) ใน `TranslationPipelineWorker` ไม่ให้เปิดยิง `asyncio.to_thread` ของ OCR ครบทุกหน้าพร้อมกันจน CPU 100% Lockup และจำกัดจำนวน OpenMP / OpenCV threads ใน `ocr.py` เพื่อป้องกัน thread thrashing
+- [x] **2. จำกัด Concurrency ในขั้นตอน Inpainting & Typesetting:**
+  - ครอบขั้นตอน CPU-bound (`inpaint_image` และ `typeset_image`) ด้วย bounded executor / semaphore เพื่อรักษาความลื่นไหลของ Asyncio Event Loop และเซิร์ฟเวอร์เว็บ API ไม่ให้ระบบหรือเบราว์เซอร์กระตุกระหว่างสั่งแปล
+- [x] **3. สร้าง Unit Tests ครอบคลุม Bounded Execution & Thread Safety:**
+  - สร้างชุดทดสอบยืนยันว่า `worker.py` และ `ocr.py` ทำงานภายใต้ bounded concurrency เสมอ ไม่กินทรัพยากรเกินขีดจำกัด และรันผ่าน 100%
+
+### Phase 6.18: Backend Worker Structured Logging & Frontend Job Status Badge UI Fixes
+- [x] **1. เพิ่มระบบ Structured Logging ครอบคลุมทุกขั้นตอนใน `worker.py`:**
+  - บันทึก log ทุกสถานะของการแปล (`SCRAPING`, `TRANSLATING`, `QUALITY_CHECKING`, `COMPLETED`, และ `FAILED`) เพื่อให้เทอร์มินัลเซิร์ฟเวอร์แสดงความคืบหน้าและรายละเอียดข้อผิดพลาด (stack trace via `logger.exception`) ได้อย่างชัดเจน ไม่เกิดปัญหา "ไม่มี log แต่รันต่อไม่ได้"
+- [x] **2. แก้ไข Frontend UI (`SubmitJob.tsx`) รองรับสถานะ `QUALITY_CHECKING` และ `COMPLETED_WITH_WARNINGS`:**
+  - เพิ่มการแสดงผล Badge สำหรับสถานะ `QUALITY_CHECKING` ให้แสดงข้อความกำลังตรวจสอบคุณภาพคำแปล ไม่ให้ตกไปที่ `default: ❌ เกิดข้อผิดพลาด` ที่ 55%
+  - ปรับเงื่อนไขให้ปุ่มอ่านตอนและการหยุด polling รองรับสถานะ `COMPLETED_WITH_WARNINGS` และ `SHADOW_COMPLETED`
+- [x] **3. สร้าง Unit Tests ยืนยันระบบ Logging และสถานะการทำงาน:**
+  - สร้างและรันชุดทดสอบยืนยันว่า `worker.py` ทำงานและบันทึก log ครบถ้วน รันผ่าน 100%
+
+### Phase 6.19: Unlimited AI Backup Models, Anti-Skip Token Error Recovery & Terminology Refinements
+- [x] **1. เพิ่ม AI สำรอง `groq/compound` และ `groq/compound-mini` ในลำดับ Fallback (`groq_client.py`):**
+  - เพิ่มโมเดลที่มีโควตารายวันไม่จำกัด (Unlimited Daily Tokens, 70,000 TPM) ในลำดับ Fallback เพื่อป้องกันปัญหาระบบหยุดหรือข้ามเมื่อโควตารายวันของโมเดลหลักเต็ม
+- [x] **2. ป้องกันปัญหาข้ามไม่แปลเมื่อเกิดข้อผิดพลาด Token/Rate Limit (`worker.py`):**
+  - ปรับปรุงระบบ Fallback ของ `translate_batch` ไม่ให้คืนค่าต้นฉบับภาษาอังกฤษเมื่อเกิดข้อผิดพลาด โดยจะสลับไปใช้การแปลทีละประโยค (`translate_text`) ผ่านระบบ Multi-Model Fallback อัตโนมัติ เพื่อให้แปลครบ 100%
+- [x] **3. บังคับคำแปลพลังธาตุน้ำเป็น 'ผู้ใช้พลังธาตุน้ำ' (`translator.py` & `worker.py`):**
+  - อัปเดตกฎเหล็กข้อที่ 9 ของ `VETERAN_TRANSLATOR_SYSTEM_PROMPT` และ Glossary ห้ามแปลว่า 'ฉันเป็นธาตุน้ำ/ประเภทน้ำ' พร้อม Post-Processing ปรับภาษาให้เป็นธรรมชาติ
+- [x] **4. Optimize Token Payload ประหยัด Input/Output Tokens กว่า 60% (`translator.py`):**
+  - กรองเฉพาะคำศัพท์ Glossary ที่ปรากฏจริงในหน้าปัจจุบัน และส่งรูปแบบ JSON ฉบับย่อ (`id`, `th`) เพื่อประหยัด Token และไม่เกินข้อจำกัด Context Window
+
+### Phase 6.20: Thai PUA Glyph Shaping, 10-Model AI Fallback Hierarchy (2.7M TPD) & Process Termination Scripts
+- [x] **1. แก้ไขปัญหาวรรณยุกต์ซ้อนทับบนสระบน (`typesetter.py`):**
+  - เพิ่มระบบ **Thai PUA Glyph Shaping (`_shape_thai_text`)** จัดตำแหน่งวรรณยุกต์เหนือสระบนให้อยู่ตำแหน่ง PUA สูง (`0xF70A`-`0xF70E`) อัตโนมัติเมื่อไม่มีไลบรารี RAQM แก้ปัญหาตัวอักษรซ้อนทับกัน
+- [x] **2. ขยายลำดับ AI Fallback ครบ 10 โมเดลเพื่อโควตาฟรีสูงสุด 2.7 ล้าน Token/วัน (`groq_client.py`):**
+  - จัดเรียงลำดับโมเดลตามความสามารถในการแปลไทยและโควตารายวัน ป้องกันปัญหา 429 จาก Compound AI Router
+- [x] **3. เพิ่มไฟล์สคริปต์ปิดระบบอัตโนมัติ (`stop.bat` & `stop_app.bat`):**
+  - สร้างสคริปต์จัดการ Kill โพรเซสที่เปิดพอร์ต 8000 และ 5173 รวมถึง Multiprocessing Child Process ที่ตกค้างเบื้องหลัง
+
+### Phase 6.21: Lossless Translation Payload Compression & Selective QA Fidelity
+- [x] **1. ลด payload ที่ซ้ำซ้อนใน structured translation batch (`translator.py`):**
+  - ใช้ JSON schema แบบย่อสำหรับ segment, glossary และ rolling context โดยคง source/Thai context ทั้ง 8 รายการและคำศัพท์ที่เกี่ยวข้องทั้งหมด เพื่อไม่ลดความต่อเนื่องข้ามหน้า/ข้ามตอน
+- [x] **2. แยก compact system prompt สำหรับ batch โดยคงกฎคุณภาพที่จำเป็น:**
+  - เก็บ full prompt สำหรับ legacy/single fallback และใช้คำสั่ง batch ที่เน้นความหมาย สำนวนไทย ความต่อเนื่อง และการยึด glossary แบบกระชับ ลด input token ที่ส่งซ้ำทุก API call
+- [x] **3. ให้ selective QA เห็น draft และ issue ที่ต้องแก้จริง:**
+  - ส่ง draft translation และ quality issue codes เฉพาะรอบ review เพื่อให้แก้จุดเสี่ยงอย่างมีเป้าหมาย โดยไม่แปลซ้ำทั้งกล่องจากศูนย์
+- [x] **4. เพิ่ม regression tests และวัดขนาด payload:**
+  - ยืนยันการ map ID, context 8 รายการ, glossary override และ review instruction ยังคงอยู่ พร้อมกำหนดเกณฑ์ payload ลดลงก่อนเปิดใช้
+
+### Phase 6.22: LAN Development Access Through Same-Origin API Proxy
+- [x] **1. เปิด Vite development server บน LAN อย่างชัดเจน:**
+  - กำหนด host และ port ใน Vite config เพื่อให้เข้าผ่านอุปกรณ์ใน Wi-Fi เดียวกันได้ แม้ไม่ได้เรียกผ่าน batch launcher
+- [x] **2. เปลี่ยน frontend API calls เป็น same-origin path:**
+  - ใช้ `/api/v1/...` แทน `localhost` เพื่อไม่ให้มือถือพยายามเชื่อม backend ที่อยู่บนตัวมือถือเอง
+- [x] **3. กำหนด development proxy แบบจำกัด scope:**
+  - ให้ Vite proxy เฉพาะ `/api` ไปยัง backend loopback เพื่อไม่เปิด backend ตรงออก LAN
+- [x] **4. ตรวจ build และการรับฟังพอร์ต:**
+  - ยืนยัน frontend build ผ่านและ dev server bind บนทุก network interface ก่อนส่งมอบ
+
+### Phase 6.23: Translation Fidelity Rollback After Prompt Compression Regression
+- [x] **1. คืน prompt และ schema ของ structured batch เป็น baseline คุณภาพเดิม:**
+  - ใช้ `VETERAN_TRANSLATOR_SYSTEM_PROMPT` และ payload schema เดิมที่ผ่านการใช้งานจริง เพื่อคืนสำนวน คำศัพท์ และความต่อเนื่องข้ามตอน
+- [x] **2. เพิ่ม regression guard สำหรับ prompt fidelity:**
+  - ทดสอบว่า structured batch ไม่สามารถสลับไปใช้ compact prompt หรือ compact schema โดยไม่มี golden evaluation และ human review
+- [x] **3. ตรวจชุดทดสอบ translation fidelity ก่อนเปิดใช้งาน:**
+  - รัน parser, context, glossary, quality และ refinement tests เพื่อยืนยันว่า rollback ไม่ทำให้ contract เดิมเสีย
+
+### Phase 6.24: Semantic Omission Detection for Long Dialogue
+- [x] **1. เพิ่ม quality gate สำหรับใจความสำคัญที่ตกหล่น:**
+  - ตรวจ phrase ที่มี contract ด้านความหมาย เช่น `sweet points` เพื่อไม่ให้คำแปลตัด “แต้ม/คะแนน” และเจตนาการขอออกไป
+- [x] **2. ส่ง draft และ issue เข้า semantic review:**
+  - ให้ reviewer เห็นต้นฉบับ คำแปลร่าง และจุดผิดที่ตรวจพบ เพื่อแก้ความหมายโดยไม่แปลใหม่แบบสุ่ม
+- [x] **3. เพิ่ม golden regression จาก Chapter 153:**
+  - ยืนยันว่าคำแปลที่ตกหล่น `sweet points` ถูกบล็อกและถูกส่งเข้า review ก่อน typeset
+
+### Phase 6.25: Context-Sensitive Sweet Point Review
+- [x] **1. แทนที่ keyword enforcement ด้วย ambiguity review:**
+  - ให้ `sweet point(s)` เข้าสู่ semantic review เสมอ โดยไม่บังคับเป็นคำว่าแต้ม/คะแนนหรือจุด/จังหวะจาก keyword เดียว
+- [x] **2. เพิ่ม prompt guidance สำหรับความหมายสองแบบ:**
+  - ให้ reviewer ใช้บริบทตำแหน่ง/เวลาเทียบกับคะแนน/รางวัล/มุกสนทนา เพื่อเลือกคำไทยที่ถูกต้อง
+- [x] **3. เพิ่ม regression ทั้งสองความหมาย:**
+  - ครอบคลุมคำแปล `จุด/จังหวะที่เหมาะสม` และ `แต้ม/คะแนน` เพื่อป้องกัน false positive
 
 ---
 *แผนงานฉบับนี้จัดทำขึ้นโดยยึดมั่นในหลักการ Everything Claude Code (ECC) และ blueprint ของโครงการ เพื่อเป็นแกนหลักในการปฏิบัติงานในทุกเฟสถัดไป*

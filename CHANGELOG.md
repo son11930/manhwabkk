@@ -3,6 +3,41 @@
 All notable changes to the **Manga/Manhua AI Translation Web Application** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) and [Everything Claude Code (ECC)](https://github.com/everything-claude-code) principles.
 
+## [1.3.12-ContextSensitiveSweetPointReview] - 2026-07-11
+
+### Fixed
+- Replaced the `sweet point(s)` points/score keyword requirement with an ambiguity-review flag so neither `จุด/จังหวะ` nor `แต้ม/คะแนน` is forced without context.
+- Added full-prompt reviewer guidance to select timing/position versus score/reward/banter meaning from the complete dialogue.
+- Added regression coverage for both valid Thai meanings and did not restart the backend; the change will apply on its next restart.
+
+## [1.3.11-SemanticOmissionReview] - 2026-07-11
+
+### Fixed
+- Added a semantic-omission gate for `sweet point(s)` dialogue so a translation missing the required Thai points/score meaning is rejected before typesetting.
+- Included the draft translation and detected issue codes in the existing full-prompt semantic review request, requiring the reviewer to preserve every source clause while correcting the identified omission.
+- Added a Chapter 153 regression case covering the reported mistranslation where the point request was omitted and the team-benefit question was distorted.
+
+## [1.3.10-TranslationFidelityRollback] - 2026-07-11
+
+### Fixed
+- Restored the proven structured-batch `VETERAN_TRANSLATOR_SYSTEM_PROMPT` and its original descriptive JSON schema after prompt compression caused a severe translation-quality regression.
+- Added regression checks that prevent structured batches from silently using the compact prompt or compact schema without a validated quality evaluation.
+- Removed the compact prompt and payload encoding from the production translation path; the priority is restored fidelity, terminology, and cross-bubble continuity.
+
+## [1.3.9-LANDevelopmentAccess] - 2026-07-11
+
+### Fixed
+- Configured Vite to bind to the LAN on port 5173 and proxy only `/api` requests to the backend loopback interface.
+- Replaced hardcoded frontend `localhost:8000` API URLs with same-origin `/api/v1/...` paths so phones use the host computer's API proxy rather than their own loopback address.
+
+## [1.3.8-LosslessBatchPayloadAndQA] - 2026-07-11
+
+### Improved
+- Replaced the structured translation batch prompt with a focused scene-translation contract, reducing the repeated system-prompt payload from 6,016 to 682 characters while retaining dialogue continuity, terminology, source-meaning fidelity, and JSON guarantees.
+- Compressed segments, glossary entries, and all eight rolling context records without dropping source or Thai evidence needed for cross-page consistency.
+- Passed the flagged draft and quality issue codes into selective QA so the reviewer corrects the known risk instead of translating the bubble again without its draft.
+- Added regression coverage for compact payload contents, locked glossary evidence, all eight context entries, JSON ID mapping, and selective QA review evidence.
+
 ## [1.3.7-ThaiToneMarkAlignmentAndBatchFlow] - 2026-07-11
 
 ### Added & Fixed (แก้ตำแหน่งวรรณยุกต์ตรงกลางพยัญชนะต้น ไม่ทับสระนำหน้า, ปรับระบบแปลตามบริบทห้าม Hardcode, แก้ไข Worker Batching Flow)

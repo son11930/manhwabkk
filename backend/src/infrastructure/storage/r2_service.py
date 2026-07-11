@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import List, Dict, Any
 from src.config import settings
 from src.infrastructure.storage.r2_client import get_r2_client
@@ -13,20 +14,35 @@ class R2StorageService:
         self.bucket = settings.R2_BUCKET_NAME
         self.public_url = settings.R2_DEV_URL
 
+    @staticmethod
+    def _safe_key_component(value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_-]", "-", str(value)).strip("-")
+        if not cleaned:
+            raise ValueError("storage key component is invalid")
+        return cleaned
+
     async def upload_image(
         self,
         manga_slug: str,
         chapter_number: str,
         page_index: int,
         image_bytes: bytes,
-        content_type: str = "image/jpeg"
+        content_type: str = "image/jpeg",
+        run_id: str | None = None,
     ) -> str:
         """
         Uploads a translated manga page to Cloudflare R2.
         Enforces immutable browser caching: Cache-Control: 'public, max-age=86400, immutable'
         Returns the public R2.dev URL for the Reader UI.
         """
-        key = f"{manga_slug}/{chapter_number}/{page_index}.jpg"
+        safe_slug = self._safe_key_component(manga_slug)
+        safe_chapter = self._safe_key_component(chapter_number)
+        safe_run_id = self._safe_key_component(run_id) if run_id else None
+        key = (
+            f"{safe_slug}/{safe_chapter}/{safe_run_id}/{page_index}.jpg"
+            if run_id
+            else f"{safe_slug}/{safe_chapter}/{page_index}.jpg"
+        )
         
         def _put():
             try:
@@ -37,11 +53,18 @@ class R2StorageService:
                     ContentType=content_type,
                     CacheControl="public, max-age=86400, immutable"
                 )
+                print(f"[R2 Storage Success] Uploaded image to folder: {manga_slug}/{chapter_number}/ -> {key}")
                 return f"{self.public_url}/{key}"
-            except Exception:
-                # Fallback to local static storage if Cloudflare R2 credentials are not configured
+            except Exception as e:
+                if settings.APP_ENV != "local":
+                    raise
+                # Local development fallback only. Production failures must abort the
+                # staged run so the previously published reader URLs remain valid.
+                print(f"[R2 Upload Warning] Could not upload to Cloudflare R2 ({e}). Saving to local folder: static/cache/{manga_slug}/{chapter_number}/")
                 import os
-                local_dir = os.path.join("static", "cache", manga_slug, chapter_number)
+                local_dir = os.path.join("static", "cache", safe_slug, safe_chapter)
+                if safe_run_id:
+                    local_dir = os.path.join(local_dir, safe_run_id)
                 os.makedirs(local_dir, exist_ok=True)
                 local_path = os.path.join(local_dir, f"{page_index}.jpg")
                 with open(local_path, "wb") as f:

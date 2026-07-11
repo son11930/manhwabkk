@@ -88,3 +88,7 @@ mcp-configs/
 AGENTS.md
 /scripts/
 /tests/
+.coverage
+backend/.coverage
+*.png
+*.jpg
