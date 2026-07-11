@@ -263,9 +263,9 @@ export const SubmitJob: React.FC = () => {
                 className="w-full px-4 py-3.5 rounded-2xl bg-dark-900/80 border border-gray-700 text-white focus:outline-none focus:border-accent-cyan focus:ring-2 focus:ring-accent-cyan/20 transition-all text-sm sm:text-base font-medium"
               >
                 <option value="groq">⚡ Groq Fast & Compound Router (ฟรี / ความเร็วสูง)</option>
-                <option value="deepseek-v4-flash">🚀 DeepSeek V4 Flash (ประหยัด / แปลพร้อมกัน 5 หน้า)</option>
-                <option value="deepseek-v4-pro">🧠 DeepSeek V4 Pro (ฉลาดสูงสุด / แปลพร้อมกัน 5 หน้า)</option>
-                <option value="deepseek-chat">💬 DeepSeek V3 Chat (สมดุล / แปลพร้อมกัน 5 หน้า)</option>
+                <option value="deepseek-v4-flash">🚀 DeepSeek V4 Flash (เร็วสุด & ประหยัด / แปลพร้อมกัน 5 หน้า)</option>
+                <option value="deepseek-chat">💬 DeepSeek V3 Chat (สมดุลมาตรฐาน / แปลพร้อมกัน 5 หน้า)</option>
+                <option value="deepseek-v4-pro">🧠 DeepSeek V4 Pro (ฉลาดสูงสุด วิเคราะห์ลึก / แปลพร้อมกัน 5 หน้า)</option>
               </select>
             </div>
 
