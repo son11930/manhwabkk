@@ -35,14 +35,10 @@ class R2StorageService:
         Enforces immutable browser caching: Cache-Control: 'public, max-age=86400, immutable'
         Returns the public R2.dev URL for the Reader UI.
         """
+        import time
         safe_slug = self._safe_key_component(manga_slug)
         safe_chapter = self._safe_key_component(chapter_number)
-        safe_run_id = self._safe_key_component(run_id) if run_id else None
-        key = (
-            f"{safe_slug}/{safe_chapter}/{safe_run_id}/{page_index}.jpg"
-            if run_id
-            else f"{safe_slug}/{safe_chapter}/{page_index}.jpg"
-        )
+        key = f"{safe_slug}/{safe_chapter}/{page_index}.jpg"
         
         def _put():
             try:
@@ -51,10 +47,10 @@ class R2StorageService:
                     Key=key,
                     Body=image_bytes,
                     ContentType=content_type,
-                    CacheControl="public, max-age=86400, immutable"
+                    CacheControl="no-cache, must-revalidate"
                 )
                 print(f"[R2 Storage Success] Uploaded image to folder: {manga_slug}/{chapter_number}/ -> {key}")
-                return f"{self.public_url}/{key}"
+                return f"{self.public_url}/{key}?t={int(time.time())}"
             except Exception as e:
                 if settings.APP_ENV != "local":
                     raise
