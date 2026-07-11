@@ -106,6 +106,8 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "11. Character Attitude & Nuance: Ensure dialogue reflects character intent accurately (e.g. scheming/choosing rank vs complaining).\n"
     "12. Broken English Grammar Correction: Manhwa source text often has poor grammar (e.g. 'DID BOTH BROTHER AND SISTER HAVE BEEN IN RUINS BEFORE.'). NEVER translate word-for-word into gibberish ('ทั้งพี่และน้องสาวมีถูกทำลายก่อน'). Always translate the intended context into natural Thai: 'หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?'. 'ruins/ruin' = 'ซากปรักหักพัง' (never 'ถูกทำลาย').\n"
     "13. Translator Notes (TL/N, T/N): Always translate 'TL/N:' or 'T/N:' prefix as 'หมายเหตุผู้แปล:' and translate the entire explanatory note completely into Thai script (never leave English words or fragmented lines).\n"
+    "14. Complete Sentence Translation (No Omission): NEVER summarize or omit sentences from a speech bubble. Translate every sentence completely (e.g. 'WE ALL ARE CULTIVATORS. IF WE MEET IN RUINS WE MUST HELP EACH OTHER.' -> 'พวกเราทุกคนล้วนเป็นผู้ฝึกตน หากพบกันในซากปรักหักพังก็ต้องช่วยเหลือซึ่งกันและกันนะ').\n"
+    "15. Idiom 'In Ruins and Out of It': In cultivation manhwa, 'in ruins and out of it' / 'in the ruins and out of it' means 'ทั้งในและนอกซากปรักหักพัง' (NEVER mistranslate 'ruins' as financial/life ruin 'ตกต่ำ').\n"
     "STANDARD TRANSLATION EXAMPLES:\n"
     "Q: Oh this is my sister Lu Xiaoyu, she will follow me to the ruins too\n"
     "A: โอ้นี่น้องสาวฉันลู่เสี่ยวอวี๋ เธอจะตามฉันไปที่ซากปรักหักพังด้วย\n"
@@ -127,6 +129,10 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "A: เป็นไงล่ะ? ชอบไหมล่ะ?\n"
     "Q: YOU'RE THE BEST!\n"
     "A: สุดยอดไปเลยใช่ไหมล่ะ!\n"
+    "Q: WE ALL ARE CULTIVATORS. IF WE MEET IN RUINS WE MUST HELP EACH OTHER.\n"
+    "A: พวกเราทุกคนล้วนเป็นผู้ฝึกตน หากพบกันในซากปรักหักพังก็ต้องช่วยเหลือซึ่งกันและกันนะ\n"
+    "Q: WE'LL BE COMRADES IN RUINS AND OUT OF IT.\n"
+    "A: เราจะเป็นสหายร่วมรบกันทั้งในและนอกซากปรักหักพัง\n"
     "Q: I will go harvest benefits than waiting for ruins to open that is boring\n"
     "A: ฉันจะไปหาผลประโยชน์ดีกว่า มัวแต่รอซากปรักหักพังเปิดมันน่าเบื่อ\n"
     "Q: You are too stingy Li Yixiao, you have to put yourself in the same boat as everyone\n"
@@ -396,7 +402,10 @@ class AITranslatorEngine:
             clause_connectors = r'(แต่|แต่ว่า|เพราะ|เพราะว่า|เมื่อ|ตอนที่|หลังจาก|ทว่า|ดังนั้น|ถ้า)'
             text = re.sub(f'([\u0e00-\u0e7f]{{3,}}?)(?<!ดี)(?<!มาก)(?<!น้อย)({clause_connectors})', r'\1 \2', text)
             
-        # 5. Clean up any double spaces
+        # 5. Strip unprintable control characters, zero-width chars, BOM, replacement glyphs, CJK periods/spaces, and square box symbols
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\ufeff\ufffd\u25a0-\u25ff□▯。　]', '', text)
+        # Strip trailing English periods or symbol box remnants at the end of Thai sentences
+        text = re.sub(r'([\u0e00-\u0e7f]+)\s*[\.▪•●◼■_□▯\ufffd]+\s*$', r'\1', text)
         text = re.sub(r'\s+', ' ', text).strip()
         return text
 
@@ -437,14 +446,13 @@ class AITranslatorEngine:
         expected_ids = tuple(segment.segment_id for segment in request.segments)
         if not expected_ids:
             return []
-        # Optimize input tokens: filter glossary to terms present in current page segments
+        # Filter the glossary to terms present in the current page segments.
         page_texts = " ".join(s.source_text.lower() for s in request.segments)
         relevant_glossary = [
             dict(g)
             for g in request.glossary
             if isinstance(g, dict) and g.get("source") and str(g.get("source")).lower() in page_texts
         ]
-        # Optimize context: keep only last 2 context entries as simple strings
         recent_context = [
             dict(c) if isinstance(c, dict) else str(c)
             for c in request.context[-8:]
@@ -491,6 +499,12 @@ class AITranslatorEngine:
             body["glossary"] = relevant_glossary
         if recent_context:
             body["context"] = recent_context
+        if isinstance(request.profile, dict) and request.profile.get("draft_text"):
+            body["quality_review"] = {
+                "draft_thai": str(request.profile["draft_text"]),
+                "issue_codes": [str(code) for code in request.profile.get("quality_issue_codes", ())],
+                "instruction": str(request.profile.get("quality_review", "")),
+            }
 
         messages = [
             {
@@ -500,6 +514,8 @@ class AITranslatorEngine:
                     + "\nCRITICAL SCENE COHESION & JSON FORMAT: "
                     "1. Treat all segments in the batch as a continuous sequential dialogue scene on the same comic page. Translate consecutive speech bubbles so their meaning, tone, and pronouns connect naturally across boxes (do NOT translate each bubble in isolation). "
                     "2. Return JSON only. Map each segment 'id' strictly to its Thai translation 'th'. NEVER swap IDs or omit any segment."
+                    " 3. If quality_review is provided, audit draft_thai against every source clause and correct every listed issue without omitting any meaning."
+                    " 4. 'sweet point(s)' is context-sensitive: translate timing or position as a suitable point/moment, but translate a score, reward, or banter as points/score. Infer the sense from the complete source context; never force either meaning."
                 ),
             },
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)},

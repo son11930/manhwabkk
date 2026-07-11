@@ -124,3 +124,8 @@ def test_post_process_spacing_fixes_unaffiliated_dragnet_and_phrasing():
     assert "กระแสพลังในซากปรักหักพัง" in processed7
     assert "แกนกลางของซากปรักหักพัง" in processed7
     assert "พลังอำใน" not in processed7
+
+    raw8 = "ตอนนี้พวกเขากำลังรวบรวมกำลังใหม่อีกครั้ง□"
+    processed8 = engine._post_process_spacing(raw8)
+    assert processed8 == "ตอนนี้พวกเขากำลังรวบรวมกำลังใหม่อีกครั้ง"
+    assert "□" not in processed8

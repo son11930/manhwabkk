@@ -46,7 +46,8 @@ class TypesetterEngine:
         if not text:
             return []
         import re
-        text = re.sub(r'[□■☐☒\u25a0-\u25ff\u200b-\u200f\ufeff\ue000-\uf8ff]', '', text)
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\ufeff\ufffd\u25a0-\u25ff□▯。　]', '', text)
+        text = re.sub(r'([\u0e00-\u0e7f]+)\s*[\.▪•●◼■_□▯\ufffd]+\s*$', r'\1', text).strip()
         try:
             from pythainlp.util import normalize
             from pythainlp.tokenize import word_tokenize
@@ -118,7 +119,8 @@ class TypesetterEngine:
         }
         for cjk_term, th_val in cjk_map.items():
             text = text.replace(cjk_term, th_val)
-        text = re.sub(r'\[\s*\]|\(\s*\)|【\s*】|[□■☐☒\u25a0-\u25ff\u200b-\u200f\ufeff\ue000-\uf8ff\u4e00-\u9fff\u3400-\u4dbf\uac00-\ud7af\u3040-\u30ff]', '', text).strip()
+        text = re.sub(r'\[\s*\]|\(\s*\)|【\s*】|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f□▯■☐☒。　\u25a0-\u25ff\u200b-\u200f\ufeff\ufffd\ue000-\uf8ff\u4e00-\u9fff\u3400-\u4dbf\uac00-\ud7af\u3040-\u30ff]', '', text).strip()
+        text = re.sub(r'([\u0e00-\u0e7f]+)\s*[\.▪•●◼■_□▯\ufffd]+\s*$', r'\1', text)
         text = re.sub(r'[\[\]\(\)【】]', '', text).strip()
         words = self._normalize_and_tokenize(text)
         if not words:
