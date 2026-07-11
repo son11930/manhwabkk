@@ -96,6 +96,7 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "   - sweet point / sweet points -> choose contextually: if position/timing use 'จุดที่เหมาะสม / จุดที่ลงตัว / จังหวะที่พอดี'; if banter/points use 'มอบคะแนนแสนหวาน / คะแนนดีๆ / แต้มความหวาน' (never hardcode one word). 'Isn't this what teams are for?' -> 'ทีมมีไว้ทำไมล่ะถ้าไม่ใช่แบบนี้? / นี่แหละประโยชน์ของการอยู่ทีมเดียวกันไม่ใช่เรอะ?'\n"
     "   - 'Then I'll be a D level?' / 'Then I'll be X' -> translate as deciding/choosing a rank: 'งั้น... ฉันเป็นระดับ D ก็แล้วกัน?' or 'งั้นเอาเป็นระดับ D ก็แล้วกัน?' (NEVER mistranslate as 'แล้วฉันจะแค่ระดับ D เหรอ?').\n"
     "   - Action & Idioms: 'call their hometown' / 'call on their hometown' -> 'บุกไปถึงถิ่น / บุกไปถึงบ้านเกิด' (never literal telephone 'โทรไปบ้านเกิด'); 'settle the bills / settle accounts / settle all the bills' -> 'คิดบัญชีแค้น / สะสางหนี้แค้น' (never literal utility bills).\n"
+    "   - Multi-bubble Scene Cohesion: Always translate consecutive speech boxes so they connect logically in context. 'YOU'RE THE BEST!' / 'YOU ARE THE BEST' after a show-off/question -> 'สุดยอดไปเลยใช่ไหมล่ะ! / เจ๋งที่สุดเลยใช่ไหมล่ะ!' (never literal 'นายเป็นคนดีที่สุด').\n"
     "5. Terminology: Awakening/Awaken -> 'ตื่นรู้' (or 'การตื่นรู้'); Awakened/Awakener -> 'ผู้ตื่นรู้'; Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง').\n"
     "6. Thai Spacing & Punctuation: Insert natural spaces after character names and between clauses. NEVER end Thai sentences with a period (.).\n"
     "7. Output Format: Output ONLY the translated Thai text numbered [1], [2]... No <think> tags, no commentary.\n"
@@ -112,6 +113,10 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "A: ฉันเนี่ยนะ? ระดับ E? นี่มันเรื่องตลกอะไรกัน?\n"
     "Q: SOONER OR LATER, I WILL CALL THEIR HOMETOWN, SO I CAN SETTLE ALL THE BILLS WITH THEM.\n"
     "A: ไม่ช้าก็เร็ว ฉันจะบุกไปถึงถิ่นของพวกมัน เพื่อคิดบัญชีแค้นทั้งหมดให้สาสม\n"
+    "Q: HOW WAS IT? DO YOU LIKE IT?\n"
+    "A: เป็นไงล่ะ? ชอบไหมล่ะ?\n"
+    "Q: YOU'RE THE BEST!\n"
+    "A: สุดยอดไปเลยใช่ไหมล่ะ!\n"
     "Q: I will go harvest benefits than waiting for ruins to open that is boring\n"
     "A: ฉันจะไปหาผลประโยชน์ดีกว่า มัวแต่รอซากปรักหักพังเปิดมันน่าเบื่อ\n"
     "Q: You are too stingy Li Yixiao, you have to put yourself in the same boat as everyone\n"
@@ -243,6 +248,7 @@ class AITranslatorEngine:
         text = re.sub(r'\bTO\s*ME\b', 'เกี่ยวกับฉันล่ะ', text)
         text = re.sub(r'\bFOR\s*ME\b', 'สำหรับฉัน', text)
         text = re.sub(r'\bWITH\s*ME\b', 'กับฉัน', text)
+        text = re.sub(r'นายเป็นคนดีที่สุด(!|\.|$)?', r'สุดยอดไปเลยใช่ไหมล่ะ\1', text)
         text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
         return text.strip()
 
@@ -453,7 +459,7 @@ class AITranslatorEngine:
 
         expected_ids = tuple(segment.segment_id for segment in llm_segments)
         body = {
-            "task": "Translate segments into Thai manga dialogue. Return JSON only.",
+            "task": "Translate segments sequentially as a connected Thai manga scene. Ensure dialogue flows cohesively across consecutive speech bubbles. Return JSON only.",
             "response_schema": {"translations": [{"id": "string", "th": "string"}]},
             "genre": str(request.profile.get("genre", "modern_cultivation")) if isinstance(request.profile, dict) else "modern_cultivation",
             "segments": [
@@ -471,7 +477,15 @@ class AITranslatorEngine:
             body["context"] = recent_context
 
         messages = [
-            {"role": "system", "content": self.system_prompt + "\nCRITICAL: Return JSON only. Map each segment 'id' strictly to its Thai translation 'th'. NEVER swap IDs or omit any segment."},
+            {
+                "role": "system",
+                "content": (
+                    self.system_prompt
+                    + "\nCRITICAL SCENE COHESION & JSON FORMAT: "
+                    "1. Treat all segments in the batch as a continuous sequential dialogue scene on the same comic page. Translate consecutive speech bubbles so their meaning, tone, and pronouns connect naturally across boxes (do NOT translate each bubble in isolation). "
+                    "2. Return JSON only. Map each segment 'id' strictly to its Thai translation 'th'. NEVER swap IDs or omit any segment."
+                ),
+            },
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)},
         ]
         result = None
