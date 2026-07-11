@@ -196,7 +196,7 @@ class TypesetterEngine:
     def _draw_thai_line_clean(self, draw: ImageDraw.ImageDraw, pos: tuple, text: str, font, fill: tuple) -> None:
         """
         Renders Thai characters cluster-by-cluster, lifting tone marks sitting above upper vowels
-        by ~22% of font size so tone marks never sink into upper vowels on systems without HarfBuzz.
+        by ~32% of font size so tone marks never sink into upper vowels on systems without HarfBuzz.
         """
         x, y = pos
         shift_y = max(int(getattr(font, "size", 20) * 0.32), 6)
