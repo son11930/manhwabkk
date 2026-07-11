@@ -223,7 +223,7 @@ class TypesetterEngine:
                     w_base = draw.textlength(base_char, font=font)
                 except AttributeError:
                     w_base = getattr(font, "size", 20) * 0.6
-                draw.text((x + w_base * 0.64, y - shift_y), tone_part, font=font, fill=fill)
+                draw.text((x + w_base * 0.86, y - shift_y), tone_part, font=font, fill=fill)
             else:
                 draw.text((x, y), cluster, font=font, fill=fill)
             
