@@ -50,8 +50,7 @@ class MangaOCREngine:
 
             response = self.ocr_engine(image)
             result = response[0] if isinstance(response, tuple) else response
-            if not result:
-                return []
+            result = result or []
 
             lines: list[dict[str, Any]] = []
             for item in result:
@@ -73,6 +72,65 @@ class MangaOCREngine:
                     "confidence": raw_confidence,
                 })
 
+            # Comic lettering often uses a small, stylized font that the normal
+            # detector misses entirely. Retry on an enlarged, contrast-normalized
+            # image and merge only distinct regions into the same OCR evidence.
+            enhanced_scale = 1.0
+            enhanced_result = []
+            enhanced_scale = min(3.0, max(1.0, 1800.0 / max(image.shape[:2])))
+            enhanced = cv2.resize(
+                image,
+                (0, 0),
+                fx=enhanced_scale,
+                fy=enhanced_scale,
+                interpolation=cv2.INTER_CUBIC,
+            )
+            enhanced_gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+            enhanced_gray = cv2.adaptiveThreshold(
+                enhanced_gray,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                31,
+                9,
+            )
+            enhanced_response = self.ocr_engine(cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR))
+            enhanced_result = enhanced_response[0] if isinstance(enhanced_response, tuple) else enhanced_response
+
+            def overlapping_index(candidate: dict[str, Any]) -> int | None:
+                for index, existing in enumerate(lines):
+                    left = max(candidate["left"], existing["left"])
+                    top = max(candidate["top"], existing["top"])
+                    right = min(candidate["right"], existing["right"])
+                    bottom = min(candidate["bottom"], existing["bottom"])
+                    overlap = max(0, right - left) * max(0, bottom - top)
+                    candidate_area = (candidate["right"] - candidate["left"]) * (candidate["bottom"] - candidate["top"])
+                    existing_area = (existing["right"] - existing["left"]) * (existing["bottom"] - existing["top"])
+                    union = candidate_area + existing_area - overlap
+                    if overlap / max(union, 1) >= 0.7:
+                        return index
+                return None
+
+            for item in enhanced_result or []:
+                polygon, raw_text, raw_confidence = item[0], str(item[1]).strip(), float(item[2])
+                if raw_confidence < 0.4 or len(raw_text) < 2:
+                    continue
+                candidate = {
+                    "left": int(min(point[0] for point in polygon) / (scale * enhanced_scale)),
+                    "top": int(min(point[1] for point in polygon) / (scale * enhanced_scale)),
+                    "right": int(max(point[0] for point in polygon) / (scale * enhanced_scale)),
+                    "bottom": int(max(point[1] for point in polygon) / (scale * enhanced_scale)),
+                    "text": raw_text,
+                    "confidence": raw_confidence,
+                }
+                if candidate["right"] - candidate["left"] < 10 or candidate["bottom"] - candidate["top"] < 10:
+                    continue
+                existing_index = overlapping_index(candidate)
+                if existing_index is None:
+                    lines.append(candidate)
+                elif candidate["confidence"] > lines[existing_index]["confidence"]:
+                    lines[existing_index] = candidate
+
             if not lines:
                 return []
 
@@ -83,10 +141,15 @@ class MangaOCREngine:
             for line in sorted(lines, key=lambda value: (value["top"], value["left"]))[1:]:
                 vertical_gap = line["top"] - current["bottom"]
                 current_height = max(current["bottom"] - current["top"], 15)
+                line_height = max(line["bottom"] - line["top"], 15)
+                ref_height = max(current_height, line_height)
                 current_center = (current["left"] + current["right"]) / 2
                 line_center = (line["left"] + line["right"]) / 2
                 max_width = max(current["right"] - current["left"], line["right"] - line["left"], 40)
-                same_bubble = vertical_gap <= current_height * 1.2 and abs(current_center - line_center) <= max_width * 0.5
+                horizontal_overlap = max(current["left"], line["left"]) < min(current["right"], line["right"])
+                same_bubble = (vertical_gap <= ref_height * 1.8) and (
+                    horizontal_overlap or abs(current_center - line_center) <= max_width * 0.75
+                )
                 if same_bubble:
                     current["left"] = min(current["left"], line["left"])
                     current["top"] = min(current["top"], line["top"])

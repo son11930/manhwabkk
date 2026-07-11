@@ -109,6 +109,7 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "13. Translator Notes (TL/N, T/N): Always translate 'TL/N:' or 'T/N:' prefix as 'หมายเหตุผู้แปล:' and translate the entire explanatory note completely into Thai script (never leave English words or fragmented lines).\n"
     "14. Complete Sentence Translation (No Omission): NEVER summarize or omit sentences from a speech bubble. Translate every sentence completely (e.g. 'WE ALL ARE CULTIVATORS. IF WE MEET IN RUINS WE MUST HELP EACH OTHER.' -> 'พวกเราทุกคนล้วนเป็นผู้ฝึกตน หากพบกันในซากปรักหักพังก็ต้องช่วยเหลือซึ่งกันและกันนะ').\n"
     "15. Idiom 'In Ruins and Out of It': In cultivation manhwa, 'in ruins and out of it' / 'in the ruins and out of it' means 'ทั้งในและนอกซากปรักหักพัง' (NEVER mistranslate 'ruins' as financial/life ruin 'ตกต่ำ').\n"
+    "16. Energy / Aura Translation: In cultivation manhwa, ALWAYS translate 'aura' / 'spiritual aura' as 'กระแสพลัง' or 'พลังวิญญาณ' (NEVER translate 'aura' as 'อำ' or 'อำนาจ').\n"
     "STANDARD TRANSLATION EXAMPLES:\n"
     "Q: Oh this is my sister Lu Xiaoyu, she will follow me to the ruins too\n"
     "A: โอ้นี่น้องสาวฉันลู่เสี่ยวอวี๋ เธอจะตามฉันไปที่ซากปรักหักพังด้วย\n"
@@ -271,7 +272,7 @@ class AITranslatorEngine:
         text = re.sub(r'\b(?:TL/N|T/N|TL\\N)\s*:\s*', 'หมายเหตุผู้แปล: ', text, flags=re.IGNORECASE)
         text = re.sub(r'ทั้งพี่และ\s*น้องสาวมี\s*ถูกทำลาย\s*ก่อน', 'หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?', text)
         text = re.sub(r'พลังอำ(?:นาจ)?ใน', 'กระแสพลังใน', text)
-        text = re.sub(r'พลังอำ\b', 'กระแสพลัง', text)
+        text = re.sub(r'พลังอำ', 'กระแสพลัง', text)
         text = re.sub(r'ดวงตาของซากปรักหักพัง|ดวงตาซากปรักหักพัง', 'แกนกลางของซากปรักหักพัง', text)
         return text.strip()
 
