@@ -95,6 +95,7 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "   - have trouble collecting money -> translate contextually: 'ทวงเงินยาก / เก็บค่าคุ้มครองยาก / ไถเงินยาก' (not literal 'มีปัญหาในการเก็บเงิน').\n"
     "   - sweet point / sweet points -> choose contextually: if position/timing use 'จุดที่เหมาะสม / จุดที่ลงตัว / จังหวะที่พอดี'; if banter/points use 'มอบคะแนนแสนหวาน / คะแนนดีๆ / แต้มความหวาน' (never hardcode one word). 'Isn't this what teams are for?' -> 'ทีมมีไว้ทำไมล่ะถ้าไม่ใช่แบบนี้? / นี่แหละประโยชน์ของการอยู่ทีมเดียวกันไม่ใช่เรอะ?'\n"
     "   - 'Then I'll be a D level?' / 'Then I'll be X' -> translate as deciding/choosing a rank: 'งั้น... ฉันเป็นระดับ D ก็แล้วกัน?' or 'งั้นเอาเป็นระดับ D ก็แล้วกัน?' (NEVER mistranslate as 'แล้วฉันจะแค่ระดับ D เหรอ?').\n"
+    "   - Action & Idioms: 'call their hometown' / 'call on their hometown' -> 'บุกไปถึงถิ่น / บุกไปถึงบ้านเกิด' (never literal telephone 'โทรไปบ้านเกิด'); 'settle the bills / settle accounts / settle all the bills' -> 'คิดบัญชีแค้น / สะสางหนี้แค้น' (never literal utility bills).\n"
     "5. Terminology: Awakening/Awaken -> 'ตื่นรู้' (or 'การตื่นรู้'); Awakened/Awakener -> 'ผู้ตื่นรู้'; Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง').\n"
     "6. Thai Spacing & Punctuation: Insert natural spaces after character names and between clauses. NEVER end Thai sentences with a period (.).\n"
     "7. Output Format: Output ONLY the translated Thai text numbered [1], [2]... No <think> tags, no commentary.\n"
@@ -109,6 +110,8 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "A: ลู่ซู แค่ระดับ E เขาจะเข้าไปในซากปรักหักพังได้ไง\n"
     "Q: ME? E-LEVEL? WHAT KIND OF JOKE IS THIS?\n"
     "A: ฉันเนี่ยนะ? ระดับ E? นี่มันเรื่องตลกอะไรกัน?\n"
+    "Q: SOONER OR LATER, I WILL CALL THEIR HOMETOWN, SO I CAN SETTLE ALL THE BILLS WITH THEM.\n"
+    "A: ไม่ช้าก็เร็ว ฉันจะบุกไปถึงถิ่นของพวกมัน เพื่อคิดบัญชีแค้นทั้งหมดให้สาสม\n"
     "Q: I will go harvest benefits than waiting for ruins to open that is boring\n"
     "A: ฉันจะไปหาผลประโยชน์ดีกว่า มัวแต่รอซากปรักหักพังเปิดมันน่าเบื่อ\n"
     "Q: You are too stingy Li Yixiao, you have to put yourself in the same boat as everyone\n"
@@ -230,6 +233,8 @@ class AITranslatorEngine:
         text = re.sub(r'ดรังเนต|ดรักเนต|ดรากเนต|เครือข่ายเทียนหลัว', 'เครือข่ายสวรรค์', text)
         text = re.sub(r'\bอเวกเกนเนอร์\b|\bอเวกเคนเนอร์\b', 'ผู้ตื่นรู้', text)
         text = re.sub(r'\bอเวกเกน\b|\bอเวกเคน\b', 'ตื่นรู้', text)
+        text = re.sub(r'โทรไปบ้านเกิด', 'บุกไปถึงถิ่น', text)
+        text = re.sub(r'จ่ายบิลทั้งหมดกับพวกเขา|ชำระบิลทั้งหมดกับพวกเขา', 'คิดบัญชีแค้นทั้งหมดให้สาสม', text)
         text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
         return text.strip()
 
