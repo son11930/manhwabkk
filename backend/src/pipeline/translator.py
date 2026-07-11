@@ -95,7 +95,7 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "   - have trouble collecting money -> translate contextually: 'ทวงเงินยาก / เก็บค่าคุ้มครองยาก / ไถเงินยาก' (not literal 'มีปัญหาในการเก็บเงิน').\n"
     "   - sweet point / sweet points -> choose contextually: if position/timing use 'จุดที่เหมาะสม / จุดที่ลงตัว / จังหวะที่พอดี'; if banter/points use 'มอบคะแนนแสนหวาน / คะแนนดีๆ / แต้มความหวาน' (never hardcode one word). 'Isn't this what teams are for?' -> 'ทีมมีไว้ทำไมล่ะถ้าไม่ใช่แบบนี้? / นี่แหละประโยชน์ของการอยู่ทีมเดียวกันไม่ใช่เรอะ?'\n"
     "   - 'Then I'll be a D level?' / 'Then I'll be X' -> translate as deciding/choosing a rank: 'งั้น... ฉันเป็นระดับ D ก็แล้วกัน?' or 'งั้นเอาเป็นระดับ D ก็แล้วกัน?' (NEVER mistranslate as 'แล้วฉันจะแค่ระดับ D เหรอ?').\n"
-    "5. Terminology: Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง').\n"
+    "5. Terminology: Awakening/Awaken -> 'ตื่นรู้' (or 'การตื่นรู้'); Awakened/Awakener -> 'ผู้ตื่นรู้'; Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง').\n"
     "6. Thai Spacing & Punctuation: Insert natural spaces after character names and between clauses. NEVER end Thai sentences with a period (.).\n"
     "7. Output Format: Output ONLY the translated Thai text numbered [1], [2]... No <think> tags, no commentary.\n"
     "8. Organization/Faction Terms: Garuda/迦楼罗 -> 'การูดา'; Family/Great Families/Clan -> 'ตระกูล' or 'ตระกูลใหญ่' (never 'ครอบครัว'); Dragnet/Heavenly Network -> 'เครือข่ายสวรรค์' (never 'ดรังเนต'); Unaffiliated/Rogue Cultivator -> 'ผู้ฝึกตนไร้สังกัด'.\n"
@@ -124,7 +124,7 @@ COMPACT_PER_SEGMENT_SYSTEM_PROMPT = (
     "RULES:\n"
     "1. Pronouns: Never use formal 'คุณ'. Use ฉัน, นาย, แก, เธอ, or ท่าน.\n"
     "2. Complete Translation: Never leave English or Chinese words untranslated. Output 100% Thai script. Transliterate terms (Garuda/迦楼罗 -> 'การูดา'). NEVER output CJK Chinese/Korean characters.\n"
-    "3. Terms: Cultivator/Cultivation = 'ผู้ฝึกตน', Water-type = 'ผู้ใช้พลังธาตุน้ำ', Family/Clan = 'ตระกูล'. 'Then I'll be a D level?' -> 'งั้น... ฉันเป็นระดับ D ก็แล้วกัน?' (deciding a rank).\n"
+    "3. Terms: Awakening/Awaken = 'ตื่นรู้', Awakened/Awakener = 'ผู้ตื่นรู้', Cultivator/Cultivation = 'ผู้ฝึกตน', Water-type = 'ผู้ใช้พลังธาตุน้ำ', Family/Clan = 'ตระกูล'. 'Then I'll be a D level?' -> 'งั้น... ฉันเป็นระดับ D ก็แล้วกัน?' (deciding a rank).\n"
     "4. Output ONLY translated Thai text without introductory commentary or periods."
 )
 
@@ -228,6 +228,8 @@ class AITranslatorEngine:
         text = re.sub(r'\b(?:LEVEL|Level|level|CLASS|Class|class|RANK|Rank|rank)\s*[-–]?\s*([A-FSa-fs])\b', lambda m: f"ระดับ {m.group(1).upper()}", text)
         text = re.sub(r'ผู้ฝึกตนที่สังกัด|ผู้ฝึกตนที่ไม่ได้สังกัด|ผู้ฝึกตนสังกัด', 'ผู้ฝึกตนไร้สังกัด', text)
         text = re.sub(r'ดรังเนต|ดรักเนต|ดรากเนต|เครือข่ายเทียนหลัว', 'เครือข่ายสวรรค์', text)
+        text = re.sub(r'\bอเวกเกนเนอร์\b|\bอเวกเคนเนอร์\b', 'ผู้ตื่นรู้', text)
+        text = re.sub(r'\bอเวกเกน\b|\bอเวกเคน\b', 'ตื่นรู้', text)
         text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
         return text.strip()
 
