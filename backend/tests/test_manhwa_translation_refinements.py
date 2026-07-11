@@ -118,3 +118,9 @@ def test_post_process_spacing_fixes_unaffiliated_dragnet_and_phrasing():
     raw6 = "ทั้งพี่และน้องสาวมีถูกทำลายก่อน"
     processed6 = engine._post_process_terminology(raw6)
     assert "หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?" in processed6
+
+    raw7 = "พลังอำในซากปรักหักพังนี้กระจายอย่างสม่ำเสมอมาก นายจะรู้ได้ยังไงว่าข้างไหนคือดวงตาของซากปรักหักพัง?"
+    processed7 = engine._post_process_terminology(raw7)
+    assert "กระแสพลังในซากปรักหักพัง" in processed7
+    assert "แกนกลางของซากปรักหักพัง" in processed7
+    assert "พลังอำใน" not in processed7

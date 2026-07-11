@@ -97,7 +97,7 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "   - 'Then I'll be a D level?' / 'Then I'll be X' -> translate as deciding/choosing a rank: 'งั้น... ฉันเป็นระดับ D ก็แล้วกัน?' or 'งั้นเอาเป็นระดับ D ก็แล้วกัน?' (NEVER mistranslate as 'แล้วฉันจะแค่ระดับ D เหรอ?').\n"
     "   - Action & Idioms: 'call their hometown' / 'call on their hometown' -> 'บุกไปถึงถิ่น / บุกไปถึงบ้านเกิด' (never literal telephone 'โทรไปบ้านเกิด'); 'settle the bills / settle accounts / settle all the bills' -> 'คิดบัญชีแค้น / สะสางหนี้แค้น' (never literal utility bills).\n"
     "   - Multi-bubble Scene Cohesion: Always translate consecutive speech boxes so they connect logically in context. 'YOU'RE THE BEST!' / 'YOU ARE THE BEST' after a show-off/question -> 'สุดยอดไปเลยใช่ไหมล่ะ! / เจ๋งที่สุดเลยใช่ไหมล่ะ!' (never literal 'นายเป็นคนดีที่สุด').\n"
-    "5. Terminology: Awakening/Awaken -> 'ตื่นรู้' (or 'การตื่นรู้'); Awakened/Awakener -> 'ผู้ตื่นรู้'; Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง').\n"
+    "5. Terminology: Awakening/Awaken -> 'ตื่นรู้' (or 'การตื่นรู้'); Awakened/Awakener -> 'ผู้ตื่นรู้'; Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง'); Aura/Spiritual Aura -> 'กระแสพลัง' or 'พลังวิญญาณ' (NEVER clipped/hallucinated 'พลังอำ'); Eye of Ruin/Eye of Formation -> 'แกนกลางซากปรักหักพัง' or 'จุดศูนย์กลางซากปรักหักพัง' (never literal 'ดวงตาของซากปรักหักพัง').\n"
     "6. Thai Spacing & Punctuation: Insert natural spaces after character names and between clauses. NEVER end Thai sentences with a period (.).\n"
     "7. Output Format: Output ONLY the translated Thai text numbered [1], [2]... No <think> tags, no commentary.\n"
     "8. Organization/Faction Terms: Garuda/迦楼罗 -> 'การูดา'; Family/Great Families/Clan -> 'ตระกูล' or 'ตระกูลใหญ่' (never 'ครอบครัว'); Dragnet/Heavenly Network -> 'เครือข่ายสวรรค์' (never 'ดรังเนต'); Unaffiliated/Rogue Cultivator -> 'ผู้ฝึกตนไร้สังกัด'.\n"
@@ -115,6 +115,8 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "A: ฉันเนี่ยนะ? ระดับ E? นี่มันเรื่องตลกอะไรกัน?\n"
     "Q: I REALLY ENVY THEM. I DON'T KNOW WHEN WE WILL REACH THE C LEVEL LET ALONE B LEVEL.\n"
     "A: ฉันอิจฉาพวกเขาจริงๆ ไม่รู้เลยว่าเมื่อไหร่พวกเราถึงจะไปถึงระดับ C นับประสาอะไรกับระดับ B\n"
+    "Q: THE AURA IN THIS RUIN IS SO EVENLY DISTRIBUTED, HOW DO YOU DETERMINE WHICH SIDE IS THE EYE OF RUIN?\n"
+    "A: กระแสพลังในซากปรักหักพังนี้กระจายตัวอย่างสม่ำเสมอมาก นายรู้ได้ยังไงว่าฝั่งไหนคือแกนกลางของซากปรักหักพัง?\n"
     "Q: DID BOTH BROTHER AND SISTER HAVE BEEN IN RUINS BEFORE.\n"
     "A: หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?\n"
     "Q: TL/N: SAN XIU (THREE STAR) IS THE AREA IN KOH CHANG ISLAND WHERE THE RUIN IS OPENED\n"
@@ -261,6 +263,9 @@ class AITranslatorEngine:
         text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
         text = re.sub(r'\b(?:TL/N|T/N|TL\\N)\s*:\s*', 'หมายเหตุผู้แปล: ', text, flags=re.IGNORECASE)
         text = re.sub(r'ทั้งพี่และ\s*น้องสาวมี\s*ถูกทำลาย\s*ก่อน', 'หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?', text)
+        text = re.sub(r'พลังอำ(?:นาจ)?ใน', 'กระแสพลังใน', text)
+        text = re.sub(r'พลังอำ\b', 'กระแสพลัง', text)
+        text = re.sub(r'ดวงตาของซากปรักหักพัง|ดวงตาซากปรักหักพัง', 'แกนกลางของซากปรักหักพัง', text)
         return text.strip()
 
     def _post_process_spacing(self, text: str) -> str:
