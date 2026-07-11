@@ -290,12 +290,16 @@ class TranslationPipelineWorker:
                 for segment in page_segments:
                     result = result_map.get(segment.segment_id)
                     if result is None:
+                        thai_val = await self.translator.translate_text(
+                            segment.source_text,
+                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                        )
                         result = TranslationResult(
                             segment_id=segment.segment_id,
                             source_text=segment.source_text,
-                            draft_thai="",
-                            final_thai=segment.source_text,
-                            model="",
+                            draft_thai=thai_val or segment.source_text,
+                            final_thai=thai_val or segment.source_text,
+                            model="single_fallback",
                             attempts=1,
                             qc_status="NEEDS_REVIEW",
                             issue_codes=("RESULT_COUNT_MISMATCH",),

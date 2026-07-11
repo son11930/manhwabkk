@@ -88,7 +88,7 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "You are an expert Veteran Scanlator translating manhwa/manhua dialogue into expressive, natural Thai spoken language.\n"
     "CRITICAL RULES:\n"
     "1. Pronouns: Never use formal 'คุณ'. Use natural manhwa pronouns: 'นาย', 'เธอ', 'แก', 'ฉัน', 'ท่าน', or character names.\n"
-    "2. Complete Translation: Never leave English/Chinese words untranslated. Translate 100% into natural Thai.\n"
+    "2. Complete Translation: Never leave English/Chinese words untranslated. Output 100% Thai script. Transliterate organization/faction names (e.g. Garuda/迦楼罗 -> 'การูดา', Heavenly Network/天罗地网 -> 'เครือข่ายสวรรค์'). NEVER output CJK Chinese/Korean characters.\n"
     "3. Accuracy & Integrity: Translate every sentence completely. Do not summarize, omit, or invent faction names/ranks (e.g., if source is D-level, translate D-level).\n"
     "4. Natural Contextual Phrasing (Never translate literally or formally like a news report):\n"
     "   - rob / steal / robbery -> choose contextually: 'ปล้น', 'ขโมย', or 'ไถเงิน' (never formal 'โจรกรรม').\n"
@@ -97,7 +97,7 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "5. Terminology: Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง').\n"
     "6. Thai Spacing & Punctuation: Insert natural spaces after character names and between clauses. NEVER end Thai sentences with a period (.).\n"
     "7. Output Format: Output ONLY the translated Thai text numbered [1], [2]... No <think> tags, no commentary.\n"
-    "8. Organization/Faction Terms: Family/Great Families/Clan -> 'ตระกูล' or 'ตระกูลใหญ่' (never 'ครอบครัว'); Dragnet/Heavenly Network -> 'เครือข่ายสวรรค์' (never 'ดรังเนต'); Unaffiliated/Rogue Cultivator -> 'ผู้ฝึกตนไร้สังกัด'.\n"
+    "8. Organization/Faction Terms: Garuda/迦楼罗 -> 'การูดา'; Family/Great Families/Clan -> 'ตระกูล' or 'ตระกูลใหญ่' (never 'ครอบครัว'); Dragnet/Heavenly Network -> 'เครือข่ายสวรรค์' (never 'ดรังเนต'); Unaffiliated/Rogue Cultivator -> 'ผู้ฝึกตนไร้สังกัด'.\n"
     "9. Elements & System UI: Water-type -> 'ผู้ใช้พลังธาตุน้ำ / สายธาตุน้ำ'; NEGATIVE EMOTION VALUE -> 'แต้มอารมณ์ด้านลบ / ได้รับแต้มอารมณ์ด้านลบ'.\n"
     "10. Ranks/Levels/Classes: Always keep uppercase English letters: 'ระดับ A', 'ระดับ B', 'ระดับ E', 'คลาส S' (never spell out 'ระดับเอ').\n"
     "11. Character Attitude & Nuance: 'Am I only a D-level?' -> 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?' (not robotic 'อืม..').\n"
@@ -120,7 +120,7 @@ COMPACT_PER_SEGMENT_SYSTEM_PROMPT = (
     "You are an expert manhwa translator. Translate dialogue into natural spoken Thai.\n"
     "RULES:\n"
     "1. Pronouns: Never use formal 'คุณ'. Use ฉัน, นาย, แก, เธอ, or ท่าน.\n"
-    "2. Complete Translation: Never leave English words untranslated. Translate 100% naturally into Thai.\n"
+    "2. Complete Translation: Never leave English or Chinese words untranslated. Output 100% Thai script. Transliterate terms (Garuda/迦楼罗 -> 'การูดา'). NEVER output CJK Chinese/Korean characters.\n"
     "3. Terms: Cultivator/Cultivation = 'ผู้ฝึกตน', Water-type = 'ผู้ใช้พลังธาตุน้ำ', Family/Clan = 'ตระกูล'.\n"
     "4. Output ONLY translated Thai text without introductory commentary or periods."
 )
@@ -407,6 +407,31 @@ class AITranslatorEngine:
             dict(c) if isinstance(c, dict) else str(c)
             for c in request.context[-8:]
         ]
+        pre_translated: dict[str, str] = {}
+        llm_segments = []
+        for segment in request.segments:
+            st = segment.source_text.strip()
+            if not any(c.isalpha() for c in st):
+                pre_translated[segment.segment_id] = st
+            else:
+                llm_segments.append(segment)
+
+        if not llm_segments:
+            return [
+                TranslationResult(
+                    segment_id=segment.segment_id,
+                    source_text=segment.source_text,
+                    draft_thai=pre_translated.get(segment.segment_id, segment.source_text),
+                    final_thai=pre_translated.get(segment.segment_id, segment.source_text),
+                    model="punctuation_passthrough",
+                    attempts=0,
+                    qc_status="APPROVED",
+                    issue_codes=(),
+                )
+                for segment in request.segments
+            ]
+
+        expected_ids = tuple(segment.segment_id for segment in llm_segments)
         body = {
             "task": "Translate segments into Thai manga dialogue. Return JSON only.",
             "response_schema": {"translations": [{"id": "string", "th": "string"}]},
@@ -417,7 +442,7 @@ class AITranslatorEngine:
                     "id": segment.segment_id,
                     "text": segment.source_text,
                 }
-                for segment in request.segments
+                for segment in llm_segments
             ],
         }
         if relevant_glossary:
@@ -426,11 +451,11 @@ class AITranslatorEngine:
             body["context"] = recent_context
 
         messages = [
-            {"role": "system", "content": self.system_prompt + "\nตอบเป็น JSON เท่านั้น ห้ามตัดทอนข้อความ"},
+            {"role": "system", "content": self.system_prompt + "\nCRITICAL: Return JSON only. Map each segment 'id' strictly to its Thai translation 'th'. NEVER swap IDs or omit any segment."},
             {"role": "user", "content": json.dumps(body, ensure_ascii=False)},
         ]
         result = None
-        translated = None
+        translated = {}
         for attempt in range(2):
             if isinstance(self.client, GroqClient):
                 completion = await self.client.generate_chat_completion_result(
@@ -453,15 +478,23 @@ class AITranslatorEngine:
                     except TranslationResponseError:
                         raise
                 else:
-                    messages[0]["content"] = self.system_prompt + "\nสำคัญมาก: บังคับตอบเป็น JSON object ที่ถูกต้องเท่านั้น ห้ามมีคำอธิบาย ห้ามมี markdown"
+                    messages[0]["content"] = self.system_prompt + "\nCRITICAL: Return valid JSON object only. Map every single segment id strictly 1-to-1. No explanation."
 
+        translated.update(pre_translated)
+        refusal_phrases = ("ไม่มีข้อความให้แปล", "ไม่สามารถแปลได้", "ไม่มีข้อความ", "ข้อความไม่ชัดเจน", "โปรดระบุข้อความ")
         for segment in request.segments:
-            if segment.segment_id not in translated:
+            curr = translated.get(segment.segment_id, "").strip()
+            if any(p in curr for p in refusal_phrases):
+                curr = segment.source_text.strip()
+                translated[segment.segment_id] = curr
+            if not curr or (curr == segment.source_text.strip() and segment.segment_id not in pre_translated):
                 single_th = await self.translate_text(
                     segment.source_text,
                     genre=str(request.profile.get("genre", "modern_cultivation")) if isinstance(request.profile, dict) else "modern_cultivation",
                 )
-                translated[segment.segment_id] = single_th
+                if any(p in single_th for p in refusal_phrases):
+                    single_th = segment.source_text.strip()
+                translated[segment.segment_id] = single_th or segment.source_text
 
         return [
             TranslationResult(

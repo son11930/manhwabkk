@@ -109,7 +109,16 @@ class TypesetterEngine:
         max_line_width = max(box_width - 12, int(box_width * 0.9))
         
         import re
-        text = re.sub(r'\[\s*\]|\(\s*\)|【\s*】|[□■☐☒\u25a0-\u25ff\u200b-\u200f\ufeff\ue000-\uf8ff]', '', text).strip()
+        cjk_map = {
+            "迦楼罗": "การูดา",
+            "天罗地网": "เครือข่ายสวรรค์",
+            "聂廷": "เนี่ยถิง",
+            "石学晋": "สือเสวียจิ้น",
+            "吕": "หลี่",
+        }
+        for cjk_term, th_val in cjk_map.items():
+            text = text.replace(cjk_term, th_val)
+        text = re.sub(r'\[\s*\]|\(\s*\)|【\s*】|[□■☐☒\u25a0-\u25ff\u200b-\u200f\ufeff\ue000-\uf8ff\u4e00-\u9fff\u3400-\u4dbf\uac00-\ud7af\u3040-\u30ff]', '', text).strip()
         text = re.sub(r'[\[\]\(\)【】]', '', text).strip()
         words = self._normalize_and_tokenize(text)
         if not words:
