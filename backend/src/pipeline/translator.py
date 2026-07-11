@@ -100,13 +100,15 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "7. Output Format: Output ONLY the translated Thai text numbered [1], [2]... No <think> tags, no commentary.\n"
     "8. Organization/Faction Terms: Garuda/迦楼罗 -> 'การูดา'; Family/Great Families/Clan -> 'ตระกูล' or 'ตระกูลใหญ่' (never 'ครอบครัว'); Dragnet/Heavenly Network -> 'เครือข่ายสวรรค์' (never 'ดรังเนต'); Unaffiliated/Rogue Cultivator -> 'ผู้ฝึกตนไร้สังกัด'.\n"
     "9. Elements & System UI: Water-type -> 'ผู้ใช้พลังธาตุน้ำ / สายธาตุน้ำ'; NEGATIVE EMOTION VALUE -> 'แต้มอารมณ์ด้านลบ / ได้รับแต้มอารมณ์ด้านลบ'.\n"
-    "10. Ranks/Levels/Classes: Always keep uppercase English letters: 'ระดับ A', 'ระดับ B', 'ระดับ E', 'คลาส S' (never spell out 'ระดับเอ').\n"
+    "10. Ranks/Levels/Classes: Translate 'E-LEVEL'/Level E -> 'ระดับ E'. ONLY single uppercase letters for ranks ('A', 'B', 'C', 'D', 'E', 'S') are allowed in Thai text (never leave English words like 'LEVEL' or 'CLASS').\n"
     "11. Character Attitude & Nuance: Ensure dialogue reflects character intent accurately (e.g. scheming/choosing rank vs complaining).\n"
     "STANDARD TRANSLATION EXAMPLES:\n"
     "Q: Oh this is my sister Lu Xiaoyu, she will follow me to the ruins too\n"
     "A: โอ้นี่น้องสาวฉันลู่เสี่ยวอวี๋ เธอจะตามฉันไปที่ซากปรักหักพังด้วย\n"
     "Q: Lu Shu is only Level E, how could he enter the ruins?\n"
     "A: ลู่ซู แค่ระดับ E เขาจะเข้าไปในซากปรักหักพังได้ไง\n"
+    "Q: ME? E-LEVEL? WHAT KIND OF JOKE IS THIS?\n"
+    "A: ฉันเนี่ยนะ? ระดับ E? นี่มันเรื่องตลกอะไรกัน?\n"
     "Q: I will go harvest benefits than waiting for ruins to open that is boring\n"
     "A: ฉันจะไปหาผลประโยชน์ดีกว่า มัวแต่รอซากปรักหักพังเปิดมันน่าเบื่อ\n"
     "Q: You are too stingy Li Yixiao, you have to put yourself in the same boat as everyone\n"
@@ -222,6 +224,8 @@ class AITranslatorEngine:
             lambda m: f"{m.group(1)} {m.group(2).upper()}",
             text
         )
+        text = re.sub(r'\b([A-FSa-fs])\s*[-–]\s*(?:LEVEL|Level|level|CLASS|Class|class|RANK|Rank|rank)\b', lambda m: f"ระดับ {m.group(1).upper()}", text)
+        text = re.sub(r'\b(?:LEVEL|Level|level|CLASS|Class|class|RANK|Rank|rank)\s*[-–]?\s*([A-FSa-fs])\b', lambda m: f"ระดับ {m.group(1).upper()}", text)
         text = re.sub(r'ผู้ฝึกตนที่สังกัด|ผู้ฝึกตนที่ไม่ได้สังกัด|ผู้ฝึกตนสังกัด', 'ผู้ฝึกตนไร้สังกัด', text)
         text = re.sub(r'ดรังเนต|ดรักเนต|ดรากเนต|เครือข่ายเทียนหลัว', 'เครือข่ายสวรรค์', text)
         text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
