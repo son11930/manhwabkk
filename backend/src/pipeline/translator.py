@@ -111,6 +111,8 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "A: ลู่ซู แค่ระดับ E เขาจะเข้าไปในซากปรักหักพังได้ไง\n"
     "Q: ME? E-LEVEL? WHAT KIND OF JOKE IS THIS?\n"
     "A: ฉันเนี่ยนะ? ระดับ E? นี่มันเรื่องตลกอะไรกัน?\n"
+    "Q: I REALLY ENVY THEM. I DON'T KNOW WHEN WE WILL REACH THE C LEVEL LET ALONE B LEVEL.\n"
+    "A: ฉันอิจฉาพวกเขาจริงๆ ไม่รู้เลยว่าเมื่อไหร่พวกเราถึงจะไปถึงระดับ C นับประสาอะไรกับระดับ B\n"
     "Q: SOONER OR LATER, I WILL CALL THEIR HOMETOWN, SO I CAN SETTLE ALL THE BILLS WITH THEM.\n"
     "A: ไม่ช้าก็เร็ว ฉันจะบุกไปถึงถิ่นของพวกมัน เพื่อคิดบัญชีแค้นทั้งหมดให้สาสม\n"
     "Q: HOW WAS IT? DO YOU LIKE IT?\n"
@@ -236,7 +238,8 @@ class AITranslatorEngine:
             lambda m: f"{m.group(1)} {m.group(2).upper()}",
             text
         )
-        text = re.sub(r'\b([A-FSa-fs])\s*[-–]\s*(?:LEVEL|Level|level|CLASS|Class|class|RANK|Rank|rank)\b', lambda m: f"ระดับ {m.group(1).upper()}", text)
+        text = re.sub(r'[ะฯๆ]([A-Za-z0-9\s]+)[ะฯๆ]', r'\1', text)
+        text = re.sub(r'\b([A-FSa-fs])\s*[-–]?\s*(?:LEVEL|Level|level|CLASS|Class|class|RANK|Rank|rank)\b', lambda m: f"ระดับ {m.group(1).upper()}", text)
         text = re.sub(r'\b(?:LEVEL|Level|level|CLASS|Class|class|RANK|Rank|rank)\s*[-–]?\s*([A-FSa-fs])\b', lambda m: f"ระดับ {m.group(1).upper()}", text)
         text = re.sub(r'ผู้ฝึกตนที่สังกัด|ผู้ฝึกตนที่ไม่ได้สังกัด|ผู้ฝึกตนสังกัด', 'ผู้ฝึกตนไร้สังกัด', text)
         text = re.sub(r'ดรังเนต|ดรักเนต|ดรากเนต|เครือข่ายเทียนหลัว', 'เครือข่ายสวรรค์', text)
