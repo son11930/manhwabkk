@@ -22,13 +22,10 @@ class BatchTranslationResult:
 def calculate_deepseek_cost_usd(provider: str, input_tokens: int, output_tokens: int) -> float:
     provider_lower = (provider or "").lower().strip()
     if provider_lower in ("deepseek-v4-pro", "deepseek-reasoner"):
-        in_rate = 0.55 / 1_000_000.0
-        out_rate = 2.19 / 1_000_000.0
-    elif provider_lower == "deepseek-v4-flash":
-        in_rate = 0.28 / 1_000_000.0
-        out_rate = 0.56 / 1_000_000.0
+        in_rate = 0.435 / 1_000_000.0
+        out_rate = 0.87 / 1_000_000.0
     else:
-        # deepseek-chat default
+        # deepseek-v4-flash / deepseek-chat ($0.14 input / $0.28 output per 1M tokens)
         in_rate = 0.14 / 1_000_000.0
         out_rate = 0.28 / 1_000_000.0
 
