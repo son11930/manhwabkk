@@ -24,8 +24,11 @@ def calculate_deepseek_cost_usd(provider: str, input_tokens: int, output_tokens:
     if provider_lower in ("deepseek-v4-pro", "deepseek-reasoner"):
         in_rate = 0.55 / 1_000_000.0
         out_rate = 2.19 / 1_000_000.0
+    elif provider_lower == "deepseek-v4-flash":
+        in_rate = 0.28 / 1_000_000.0
+        out_rate = 0.56 / 1_000_000.0
     else:
-        # deepseek-chat / deepseek-v4-flash default
+        # deepseek-chat default
         in_rate = 0.14 / 1_000_000.0
         out_rate = 0.28 / 1_000_000.0
 

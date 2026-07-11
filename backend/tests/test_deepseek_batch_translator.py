@@ -48,7 +48,7 @@ def test_group_pages_respects_max_segments_limit():
 
 def test_cost_calculation_for_deepseek_models():
     cost_flash = calculate_deepseek_cost_usd("deepseek-v4-flash", 1_000_000, 1_000_000)
-    assert cost_flash == pytest.approx(0.14 + 0.28)
+    assert cost_flash == pytest.approx(0.28 + 0.56)
 
     cost_chat = calculate_deepseek_cost_usd("deepseek-chat", 1_000_000, 1_000_000)
     assert cost_chat == pytest.approx(0.14 + 0.28)
