@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from collections.abc import Callable, Mapping, Sequence
 from typing import Optional
 import uuid
@@ -25,8 +26,9 @@ from src.pipeline.ocr import MangaOCREngine
 from src.pipeline.quality import TranslationQualityGate
 from src.pipeline.translator import AITranslatorEngine, TranslationResponseError
 from src.infrastructure.ai.factory import get_ai_client
-from src.pipeline.deepseek_batch_translator import DeepSeekBatchTranslator, group_pages_for_batching
+from src.pipeline.deepseek_batch_translator import DeepSeekBatchTranslator, append_batch_context, group_pages_for_batching
 from src.pipeline.typesetter import TypesetterEngine
+from src.config import settings
 
 
 _SPARE_ME_GREAT_LORD_GLOSSARY = (
@@ -294,7 +296,12 @@ class TranslationPipelineWorker:
                 active_ds_translator = batch_translator
                 recovery_translator = AITranslatorEngine(client=client)
                 ordered_page_segs = [segments_by_page[page["index"]] for page in pages_data]
-                batches = group_pages_for_batching(ordered_page_segs)
+                batches = group_pages_for_batching(
+                    ordered_page_segs,
+                    max_pages=settings.DEEPSEEK_BATCH_PAGES,
+                    max_segments=settings.DEEPSEEK_MAX_BATCH_SEGMENTS,
+                    max_chars=settings.DEEPSEEK_MAX_BATCH_INPUT_CHARS,
+                )
                 # Separate batch concurrency by provider tier with safety headroom
                 if provider in ("deepseek-v4-flash", "deepseek-chat"):
                     batch_limit = 6
@@ -302,60 +309,81 @@ class TranslationPipelineWorker:
                     batch_limit = 3
                 else:
                     batch_limit = 1
-                batch_semaphore = asyncio.Semaphore(batch_limit)
-                initial_context = tuple(rolling_context[-8:])
 
                 stage_ai_start = time.perf_counter()
                 logger.info(
-                    "[Worker] [Job %s] === STAGE 2/4: AI Batch Translation started (%d batches across %d pages, provider=%s, concurrency=%d) ===",
+                    "[Worker] [Job %s] === STAGE 2/4: serial contextual AI Batch Translation started (%d batches across %d pages, provider=%s, configured_provider_cap=%d) ===",
                     job_id, len(batches), len(pages_data), provider, batch_limit
                 )
 
-                async def translate_deepseek_batch(batch_idx: int, page_batch):
+                async def translate_deepseek_batch(batch_idx: int, page_batch, context):
                     batch_start = time.perf_counter()
-                    async with batch_semaphore:
-                        try:
-                            res = await batch_translator.translate_page_batch(
-                                page_batch,
-                                glossary=tuple(glossary),
-                                context=initial_context,
-                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                            )
-                        except Exception as first_error:
-                            logger.warning(
-                                "[Worker] [Job %s] Batch %d/%d attempt 1 failed (%s: %s), retrying once...",
-                                job_id, batch_idx, len(batches), type(first_error).__name__, first_error
-                            )
-                            res = await batch_translator.translate_page_batch(
-                                page_batch,
-                                glossary=tuple(glossary),
-                                context=initial_context,
-                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                            )
-                        logger.info(
-                            "[Worker] [Job %s] Batch %d/%d completed in %.2fs (%d segments translated)",
-                            job_id, batch_idx, len(batches), time.perf_counter() - batch_start, len(res.translations)
+                    try:
+                        res = await batch_translator.translate_page_batch(
+                            page_batch,
+                            glossary=tuple(glossary),
+                            context=context,
+                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
                         )
-                        return res
+                        missing_ids = res.parse_outcome.missing_ids if res.parse_outcome else ()
+                        if missing_ids:
+                            missing_id_set = set(missing_ids)
+                            missing_segments = [
+                                segment
+                                for page in page_batch
+                                for segment in page
+                                if segment.segment_id in missing_id_set
+                            ]
+                            logger.warning(
+                                "[Worker] [Job %s] Batch %d/%d preserved %d translations; recovering %d missing IDs only",
+                                job_id, batch_idx, len(batches), len(res.translations), len(missing_segments),
+                            )
+                            try:
+                                recovered = await batch_translator.translate_page_batch(
+                                    [missing_segments],
+                                    glossary=tuple(glossary),
+                                    context=context,
+                                    genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                                )
+                                res = replace(
+                                    res,
+                                    translations={**res.translations, **recovered.translations},
+                                    input_tokens=res.input_tokens + recovered.input_tokens,
+                                    output_tokens=res.output_tokens + recovered.output_tokens,
+                                    cost_usd=res.cost_usd + recovered.cost_usd,
+                                )
+                            except Exception as recovery_error:
+                                logger.warning(
+                                    "[Worker] [Job %s] Batch %d/%d missing-only recovery failed (%s); retaining valid partial translations",
+                                    job_id, batch_idx, len(batches), type(recovery_error).__name__,
+                                )
+                    except Exception as first_error:
+                        logger.warning(
+                            "[Worker] [Job %s] Batch %d/%d attempt 1 failed (%s), retrying once...",
+                            job_id, batch_idx, len(batches), type(first_error).__name__,
+                        )
+                        res = await batch_translator.translate_page_batch(
+                            page_batch,
+                            glossary=tuple(glossary),
+                            context=context,
+                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                        )
+                    logger.info(
+                        "[Worker] [Job %s] Batch %d/%d completed in %.2fs (%d segments translated)",
+                        job_id, batch_idx, len(batches), time.perf_counter() - batch_start, len(res.translations)
+                    )
+                    return res
 
-                batch_outcomes = await asyncio.gather(
-                    *(translate_deepseek_batch(i, page_batch) for i, page_batch in enumerate(batches, start=1)),
-                    return_exceptions=True,
-                )
-                for page_batch, batch_outcome in zip(batches, batch_outcomes):
-                    if isinstance(batch_outcome, Exception):
-                        logger.warning("[Worker] [Job %s] DeepSeek batch translation failed: %s: %s", job_id, type(batch_outcome).__name__, batch_outcome)
+                for batch_idx, page_batch in enumerate(batches, start=1):
+                    batch_context = tuple(rolling_context[-8:])
+                    try:
+                        batch_res = await translate_deepseek_batch(batch_idx, page_batch, batch_context)
+                    except Exception as batch_error:
+                        logger.warning("[Worker] [Job %s] DeepSeek batch translation failed: %s", job_id, type(batch_error).__name__)
                         continue
                     try:
-                        batch_res = batch_outcome
                         deepseek_translations.update(batch_res.translations)
-                        for batch_page in page_batch:
-                            for segment in batch_page:
-                                rolling_context.append({
-                                    "segment_id": segment.segment_id,
-                                    "source_text": segment.source_text,
-                                    "final_thai": batch_res.translations.get(segment.segment_id, ""),
-                                })
+                        rolling_context = list(append_batch_context(batch_context, page_batch, batch_res.translations))
                         total_in_tokens += batch_res.input_tokens
                         total_out_tokens += batch_res.output_tokens
                         total_cost_usd += batch_res.cost_usd

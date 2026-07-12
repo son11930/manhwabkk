@@ -992,3 +992,25 @@ Reduce end-to-end chapter translation latency for **DeepSeek Flash (`deepseek-v4
 - Fix durable cancellation, Groq recovery, DeepSeek ordered context/concurrency, OCR quadrilateral validation, and polling generation isolation from the review findings.
 - Keep DeepSeek Flash concurrency at 6 and Pro concurrency at 3: both are well below the provider limits (2,500 and 500 respectively), while preserving the existing fast batch throughput.
 - Add regression coverage before each fix, then run backend/frontend verification and push the validated changes.
+
+# DeepSeek Batch Sweet-Spot Benchmark Plan (2026-07-13)
+
+- Benchmark provider-specific batch policies at 5, 8, 10, and full-chapter sizes while keeping Flash/Pro concurrency fixed at 6/3.
+- [x] Wire existing DeepSeek batch environment settings into the worker before benchmarking; current grouping no longer relies on function defaults.
+- [x] Commit each completed DeepSeek batch into an ordered rolling context before submitting the next batch, preserving recent gender and dialogue evidence.
+- Select the lowest-p95-latency candidate only when completeness, quality, cost, retry blast radius, and 429 thresholds pass against the 5-page control.
+- Roll out behind per-provider feature flags with shadow, 10%, 50%, and 100% stages plus automatic rollback to 5 pages.
+
+# DeepSeek Failure-Amplification Remediation Plan (2026-07-13)
+
+- Baseline from Chapter 149: ~274s total; OCR 32.47s; primary DeepSeek 126.27s; recovery/render stage 112.97s; two of four primary batches failed after retry.
+- Preserve valid partial translations and retry only missing IDs with the selected DeepSeek provider/model.
+- Add bounded adaptive split, concurrent grouped recovery, chapter-level gender/entity context, and checkpoint-wave primary concurrency.
+- Target <=75s for primary translation plus recovery and <=110s total, with complete ID accounting and no silent source-text publication.
+
+# Italic/Sheared Comic OCR Recovery Plan (2026-07-13)
+
+- Baseline fixtures `img/1.PNG` and `img/2.PNG` prove the current angle-only deskew does not recover horizontal italic/sheared lettering or missing lower lines.
+- Add OCR-independent bubble/text coverage audit, targeted bubble crops, and a bounded shear/contrast/rotation transform cascade.
+- Select recovered text by visual coverage and multi-transform consensus; preserve punctuation, bubble grouping, reading order, and bounded boxes.
+- Acceptance fixtures must recover `LU SHU'S VOICE!!`, `IS HE?`, both `THIRTY-FIVE` occurrences, and `STONES!` within strict CPU budgets.

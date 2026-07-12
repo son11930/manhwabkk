@@ -1,9 +1,10 @@
 import json
+import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from src.pipeline.contracts import OCRSegment
-from src.pipeline.translator import VETERAN_TRANSLATOR_SYSTEM_PROMPT, TranslationResponseError, parse_translation_response
+from src.pipeline.translator import VETERAN_TRANSLATOR_SYSTEM_PROMPT
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,105 @@ class BatchTranslationResult:
     input_tokens: int
     output_tokens: int
     cost_usd: float
+    parse_outcome: Optional["DeepSeekBatchParseOutcome"] = None
+
+
+@dataclass(frozen=True)
+class DeepSeekBatchParseOutcome:
+    """Account for every expected segment without discarding a usable prefix."""
+
+    translations: Dict[str, str]
+    missing_ids: Tuple[str, ...]
+    duplicate_ids: Tuple[str, ...]
+    unknown_ids: Tuple[str, ...]
+    parse_error: Optional[str] = None
+
+
+def _response_entries(response_text: str) -> tuple[List[Any], Optional[str]]:
+    """Return complete translation entries even when a response ends mid-JSON."""
+    cleaned = re.sub(r"<think>.*?</think>", "", response_text or "", flags=re.DOTALL | re.IGNORECASE).strip()
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        cleaned = "\n".join(cleaned.splitlines()[1:-1]).strip()
+
+    try:
+        payload = json.loads(cleaned)
+    except (TypeError, json.JSONDecodeError) as error:
+        marker = re.search(r'"translations"\s*:\s*\[', cleaned)
+        if not marker:
+            return [], str(error)
+
+        decoder = json.JSONDecoder()
+        entries: List[Any] = []
+        index = marker.end()
+        while index < len(cleaned):
+            if cleaned[index] != "{":
+                index += 1
+                continue
+            try:
+                entry, end = decoder.raw_decode(cleaned, index)
+            except json.JSONDecodeError:
+                index += 1
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
+            index = end
+        return entries, str(error)
+
+    entries = payload.get("translations") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return [], "translation response requires a translations list"
+    return entries, None
+
+
+def parse_deepseek_batch_response(
+    response_text: str,
+    expected_segment_ids: Tuple[str, ...],
+) -> DeepSeekBatchParseOutcome:
+    """Preserve only unambiguous expected IDs and account for contract violations.
+
+    A repeated expected ID is deliberately withheld for recovery: accepting either
+    occurrence would make the selected translation ambiguous.
+    """
+    entries, parse_error = _response_entries(response_text)
+    expected = set(expected_segment_ids)
+    candidate_texts: Dict[str, str] = {}
+    seen_expected: set[str] = set()
+    duplicates: List[str] = []
+    unknown: List[str] = []
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        segment_id = entry.get("segment_id", entry.get("id"))
+        if not isinstance(segment_id, str) or not segment_id:
+            continue
+        if segment_id not in expected:
+            if segment_id not in unknown:
+                unknown.append(segment_id)
+            continue
+        if segment_id in seen_expected:
+            if segment_id not in duplicates:
+                duplicates.append(segment_id)
+            continue
+
+        seen_expected.add(segment_id)
+        text = entry.get("text", entry.get("th", entry.get("target")))
+        if isinstance(text, str) and text.strip():
+            candidate_texts[segment_id] = text.strip()
+
+    translations = {
+        segment_id: candidate_texts[segment_id]
+        for segment_id in expected_segment_ids
+        if segment_id in candidate_texts and segment_id not in duplicates
+    }
+    missing_ids = tuple(segment_id for segment_id in expected_segment_ids if segment_id not in translations)
+    return DeepSeekBatchParseOutcome(
+        translations=translations,
+        missing_ids=missing_ids,
+        duplicate_ids=tuple(duplicates),
+        unknown_ids=tuple(unknown),
+        parse_error=parse_error,
+    )
 
 
 def calculate_deepseek_cost_usd(provider: str, input_tokens: int, output_tokens: int) -> float:
@@ -39,6 +139,27 @@ def group_pages_for_batching(
     if current:
         batches.append(current)
     return batches
+
+
+def append_batch_context(
+    context: Tuple[Dict[str, str], ...],
+    pages: List[List[OCRSegment]],
+    translations: Mapping[str, str],
+    *,
+    max_items: int = 8,
+) -> Tuple[Dict[str, str], ...]:
+    """Commit a completed batch in reading order for the next DeepSeek call."""
+    committed = [dict(item) for item in context]
+    for page in pages:
+        for segment in page:
+            final_thai = translations.get(segment.segment_id, "").strip()
+            if final_thai:
+                committed.append({
+                    "segment_id": segment.segment_id,
+                    "source_text": segment.source_text,
+                    "final_thai": final_thai,
+                })
+    return tuple(committed[-max_items:])
 
 
 class DeepSeekBatchTranslator:
@@ -78,17 +199,15 @@ class DeepSeekBatchTranslator:
             temperature=0.15,
             max_tokens=3000,
         )
-        try:
-            translations = parse_translation_response(result.text, expected_ids, allow_partial=False)
-            if not translations:
-                raise RuntimeError("DeepSeek batch result is incomplete")
-        except TranslationResponseError as error:
-            raise RuntimeError("DeepSeek batch result is incomplete") from error
+        parse_outcome = parse_deepseek_batch_response(result.text, expected_ids)
+        if not parse_outcome.translations:
+            raise RuntimeError("DeepSeek batch result is incomplete")
         return BatchTranslationResult(
-            translations=translations,
+            translations=parse_outcome.translations,
             model=result.model,
             attempts=result.attempts,
             input_tokens=result.prompt_tokens,
             output_tokens=result.completion_tokens,
             cost_usd=calculate_deepseek_cost_usd(self.provider, result.prompt_tokens, result.completion_tokens),
+            parse_outcome=parse_outcome,
         )

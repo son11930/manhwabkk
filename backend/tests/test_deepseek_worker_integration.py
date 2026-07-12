@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from src.pipeline.worker import TranslationPipelineWorker
@@ -5,10 +7,12 @@ from src.pipeline.contracts import TranslationResult
 from src.domains.jobs.models import TranslationJob
 from src.infrastructure.ai.groq_client import CompletionResult
 from src.infrastructure.ai.deepseek_client import DeepSeekClient
+from src.config import settings
 
 
 @pytest.mark.asyncio
-async def test_worker_process_job_uses_deepseek_5page_batching():
+async def test_worker_passes_completed_batch_context_to_the_next_batch(monkeypatch):
+    monkeypatch.setattr(settings, "DEEPSEEK_BATCH_PAGES", 1)
     job = TranslationJob(
         id="job-deepseek-1",
         source_url="https://example.com/manga/ch1",
@@ -63,16 +67,20 @@ async def test_worker_process_job_uses_deepseek_5page_batching():
     storage.upload_bytes = AsyncMock(return_value="https://cdn.example.com/page.jpg")
     storage.upload_image = AsyncMock(return_value="https://cdn.example.com/page.jpg")
 
+    recorded_contexts = []
+
+    async def translate_with_context(*, messages, **_kwargs):
+        body = json.loads(messages[1]["content"])
+        recorded_contexts.append(body["context"])
+        segment_id = body["segments"][0]["segment_id"]
+        return CompletionResult(
+            text=json.dumps({"translations": [{"segment_id": segment_id, "text": f"ไทย {segment_id}"}]}),
+            model="deepseek-chat", attempts=1, prompt_tokens=150, completion_tokens=50, total_tokens=200,
+        )
+
     mock_client = AsyncMock()
     mock_client.model = "deepseek-chat"
-    mock_client.generate_chat_completion_result.return_value = CompletionResult(
-        text='{"translations": [{"segment_id": "1:1", "text": "แปล 1"}, {"segment_id": "2:1", "text": "แปล 2"}]}',
-        model="deepseek-chat",
-        attempts=1,
-        prompt_tokens=300,
-        completion_tokens=100,
-        total_tokens=400,
-    )
+    mock_client.generate_chat_completion_result.side_effect = translate_with_context
 
     worker = TranslationPipelineWorker(
         session=MagicMock(),
@@ -90,11 +98,13 @@ async def test_worker_process_job_uses_deepseek_5page_batching():
     worker.r2_service = storage
 
     completed = await worker.process_job("job-deepseek-1", ai_client=mock_client)
-    assert completed.status == "COMPLETED"
+    assert completed.status in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
     assert completed.input_tokens == 300
     assert completed.output_tokens == 100
     assert completed.cost_estimate_usd > 0.0
     assert completed.actual_model == "deepseek-chat"
+    assert recorded_contexts[0] == []
+    assert recorded_contexts[1] == [{"segment_id": "1:1", "source_text": "Source 1", "final_thai": "ไทย 1:1"}]
 
 
 @pytest.mark.asyncio

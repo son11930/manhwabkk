@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Fixed
+- Added bounded italic/shear OCR recovery using high-confidence coverage checks, upscaled affine variants, inverse-mapped boxes, and duplicate suppression. The supplied comic fixtures now recover previously missed `VOICE` and `STONES!` lettering.
+- DeepSeek batch parsing now preserves valid translations from incomplete or malformed-tail JSON and retries only missing IDs through the selected DeepSeek provider/model.
+- DeepSeek now commits each completed batch into an ordered eight-dialogue context window before translating the next batch. This preserves recent Thai pronouns, character relationships, and dialogue continuity without ever switching providers.
+- Connected the DeepSeek batch-size, segment-count, and character-count settings to the worker's batch grouping path; configuration now controls runtime behavior rather than only documenting it.
 - Made cancellation durable through every pipeline boundary, including after OCR, after translation, before upload, and before publication; a cancelled job cannot later overwrite the published chapter.
 - Restored Groq's provider-local segment recovery when a page batch fails, while DeepSeek remains locked to DeepSeek-only recovery.
 - Rejected incomplete DeepSeek batch payloads so missing dialogue is recovered explicitly instead of being silently accepted.

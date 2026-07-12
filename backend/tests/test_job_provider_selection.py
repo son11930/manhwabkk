@@ -94,4 +94,3 @@ async def test_service_submit_job_stores_provider():
     )
     job = await service.submit_job(req)
     assert job.translation_provider == "deepseek-chat"
-
