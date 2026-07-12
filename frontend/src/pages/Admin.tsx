@@ -113,7 +113,7 @@ export const Admin: React.FC = () => {
         <div className="glass-panel max-w-md w-full p-8 rounded-3xl border border-gray-700/60 shadow-2xl relative overflow-hidden">
           <div className="text-center mb-8">
             <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center mx-auto mb-4">
-              <Lock className="w-8 h-8 text-red-400 animate-pulse" />
+              <Lock className="w-8 h-8 text-red-400" />
             </div>
             <h1 className="text-2xl font-black text-white">ระบบควบคุมสิทธิ์ผู้ดูแล</h1>
             <p className="text-xs text-gray-400 mt-1">

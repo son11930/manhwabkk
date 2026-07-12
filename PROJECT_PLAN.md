@@ -892,6 +892,103 @@ gantt
   - เพิ่มตัวเลือก Radio Group ในหน้า `SubmitJob.tsx` สำหรับเลือก Groq (Free/Default), DeepSeek V4 Flash (5-Page Batching), และ DeepSeek V4 Pro
   - แสดง Cost Warning และ Provider-Neutral Status Badges ตามรุ่นโมเดลที่เลือก
 
+### Phase 6.27: Short English Dialogue Recovery
+- [x] **1. Retry short untranslated dialogue before typesetting:**
+  - Route deterministic English-leakage failures such as `THEM!` through the targeted review/retranslation path even when they do not meet the long-dialogue semantic-review threshold.
+- [x] **2. Preserve image integrity and verify output:**
+  - Add a worker regression test confirming recovered Thai dialogue is passed to inpainting/typesetting and the original English segment is not published unchanged.
+
+### Phase 6.28: Stylized Short-Text OCR Recovery
+- [x] **1. Detect OCR-missed comic dialogue:**
+  - Run a second, enlarged high-contrast OCR pass and merge newly detected non-overlapping text regions into the normal translation pipeline.
+- [x] **2. Verify short-text coverage:**
+  - Add regression coverage for a primary OCR pass that misses a short English line such as `TO ME`, while the enhanced pass detects it for translation and typesetting.
+
+### Phase 6.29: Chapter-Level Translation Fidelity and Publication
+- [x] **1. Preserve page and scene context in every provider lane:**
+  - Require DeepSeek multi-page batches to receive the same structured segment IDs, glossary, rolling scene context, and JSON contract as the standard translator.
+- [x] **2. Reject incomplete publication:**
+  - Fail a page that still contains untranslated English after OCR/quality recovery instead of silently publishing a partial Thai overlay.
+- [ ] **3. Reprocess with the running implementation:**
+### Phase 6.30: Job Cancellation Controls & Groq Multi-Model Pipeline Hardening
+- [x] **1. Add backend job cancellation endpoint & worker check:**
+  - Implement `POST /api/v1/jobs/{job_id}/cancel` in REST API to set job status to `CANCELLED`.
+  - Add periodic cancellation checks in `TranslationPipelineWorker.process_job` to gracefully halt execution when a job is cancelled.
+- [x] **2. Add frontend Stop/Cancel button & clear lock:**
+  - Add **"⏹️ หยุดการแปล (Stop Translation)"** button in `SubmitJob.tsx` when a job is in progress.
+  - Clear `active_job_id` and unlocking UI when status is `CANCELLED`.
+- [x] **3. Harden Groq fallback hierarchy & progress reporting:**
+  - Maintain complete 10-model fallback hierarchy in `GroqClient.get_fallback_models()`.
+  - Improve pipeline progress percentage reporting across OCR (30% -> 45%) and translation passes (45% -> 95%) so users see continuous progress rather than stalling at 30%.
+
+### Phase 6.31: OCR CPU & Memory Optimization Plan (July 11 11 PM Parity & Single-Thread Capping)
+- [x] **1. Analyze July 11 11 PM Commit Parity (`commit 3edcde2`):**
+  - Compared `backend/src/pipeline/ocr.py` and `worker.py` between July 11 11 PM and current code to identify why CPU usage spiked from <1% (or minimal single-threaded usage) to 60-70%.
+- [x] **2. Enforce Strict Single-Thread Capping (`ONNXRUNTIME_NUM_THREADS = "1"`):**
+  - Unconditionally cap OpenMP, MKL, OpenBLAS, and ONNX Runtime threads to `1` in `MangaOCREngine.__init__` so ONNX models never oversubscribe CPU cores.
+- [x] **3. Enforce Sequential Page Processing (`max_workers = 1`):**
+  - Ensure `worker.py` semaphore caps concurrent page image processing to 1 page at a time.
+- [x] **4. Verify Full Test Suite & Report CPU Footprint:**
+  - Run regression tests and confirm clean execution.
+
 ---
 *แผนงานฉบับนี้จัดทำขึ้นโดยยึดมั่นในหลักการ Everything Claude Code (ECC) และ blueprint ของโครงการ เพื่อเป็นแกนหลักในการปฏิบัติงานในทุกเฟสถัดไป*
+# Translation Pipeline Reliability and Performance Execution Plan (2026-07-12)
 
+- Execute the approved `plan.md` in TDD order: baseline/regressions, OCR and box safety, shared provider-safe batch recovery, fidelity/entity checks, then verification.
+- Preserve Groq behavior by putting shared contracts and QC changes behind provider-neutral interfaces; apply DeepSeek-only scheduling only in its adapter path.
+- Block publishing source-language or unsafe visual output, record reviewable diagnostics, and keep secrets out of logs/artifacts.
+- Required verification: focused backend unit/integration tests, visual safety regressions, provider compatibility tests, and touched-code coverage of at least 80%.
+# Performance Regression and Bubble Integrity Execution (2026-07-12)
+
+- Restore targeted OCR recovery: no unconditional full-page enhanced pass; preserve short-text recovery through bounded ROI evidence.
+- Stabilize submit-job progress polling with one abortable poller, monotonic state updates, and non-flashing status visuals.
+- Move line-level OCR evidence toward one bubble-level translation/layout unit; preserve provider locking for repairs.
+- Verify with backend regressions, frontend polling tests, provider compatibility tests, and update `CHANGELOG.md` with measured results.
+
+# DeepSeek Flash Pipeline ~60s Performance Optimization Plan (2026-07-12)
+
+## Executive Summary & Goal
+Reduce end-to-end chapter translation latency for **DeepSeek Flash (`deepseek-v4-flash`)** from **~400s (@ 62% progress) / ~600-650s (full chapter)** down to **~45–60 seconds (~1 minute per chapter)** while preserving immutable data structures, 100% segment mapping accuracy, and robust error handling.
+
+## Root Cause Analysis
+1. **Strictly Sequential Page Processing Loop**: OCR, Quality Recovery LLM calls, Inpainting/Typesetting, and Cloudflare R2 Uploads are executed sequentially per page inside a sequential `for` loop (`worker.py`).
+2. **Ephemeral HTTP Connections (No Pooling/Keep-Alive)**: `DeepSeekClient` instantiates a new `httpx.AsyncClient()` per API request, causing repeated TCP+TLS handshake latency (300–600ms overhead per call).
+3. **Restrictive Concurrency Limits**: Flash batch translation is throttled to `Semaphore(2)` in `worker.py` and `Semaphore(3)` in `deepseek_client.py`.
+4. **Blocking Synchronous Quality Recovery**: Synchronous single-segment LLM repair calls halt the page pipeline when any segment requires review.
+5. **Sequential R2 Uploads**: Network upload blocks per page before the next page rendering starts.
+
+## Target Performance Budget (~60s Goal for 20-Page Chapter)
+- **Scrape & Deduplicate**: 2 seconds (Async HTTP fetch)
+- **Parallel OCR Stage**: 8 seconds (`asyncio.gather` bounded by `Semaphore(4)`)
+- **Parallel Flash Translation**: 8 seconds (Keep-alive connection pool + 6 concurrent batches)
+- **Concurrent Page Rendering & R2 Upload**: 20 seconds (`Semaphore(4)` CPU Inpaint/Typeset + `Semaphore(10)` R2 Upload via `asyncio.gather`)
+- **Batch DB & Final Job Update**: 2 seconds
+- **Total Estimated Latency**: **~40–44 seconds** (Safely under 60 seconds target)
+
+## Actionable Phase Roadmap (1-Minute Chapter Translation Architecture)
+- [x] **Phase 1: HTTP Connection Pooling & Client Optimization (`deepseek_client.py`) [COMPLETED]**
+  - Implemented shared long-lived `httpx.AsyncClient` with connection pooling (`max_keepalive_connections=20`, `max_connections=30`).
+  - Dedicated tiered concurrency limits (`Semaphore(8)` for Flash, `Semaphore(3)` for Pro/Groq).
+- [x] **Phase 3: High-Concurrency Flash Batch Translation & 100% Guarantee (`worker.py` & `deepseek_batch_translator.py`) [COMPLETED]**
+  - Increased Flash concurrent batches to 6 batches.
+  - Added Emergency Fallback single-segment translation for unmapped/untranslated AI batch responses.
+  - Fixed QualityGate false-positive `RANK_MISMATCH` & `ENGLISH_LEAKAGE` rejections.
+- [ ] **Phase 2: Parallel OCR Extraction Stage (`worker.py` & `ocr.py`) [NEXT]**
+  - Replace sequential page-by-page OCR loop with bounded concurrent execution (`asyncio.gather` with `cpu_semaphore`).
+  - Optimize `needs_recovery` trigger logic so clean standard bubbles do not needlessly trigger expensive 3X CPU recovery.
+- [ ] **Phase 4: Parallel Page Rendering & Cloud Storage Upload (`worker.py`) [NEXT]**
+  - Refactor sequential per-page rendering (OpenCV inpainting + PIL typesetting) and Cloudflare R2 HTTPS upload into parallel tasks executed via `asyncio.gather`.
+- [ ] **Phase 5: Verification & Regression Tests**
+  - Verify 80%+ test coverage, order integrity, immutability, and end-to-end Chapter 149 execution time <= 60s.
+
+# Orientation-Aware OCR Execution: Chapter 149 Pages 8 and 15 (2026-07-13)
+
+- Implement targeted deskew OCR for stylized/rotated English text using chapter 149 pages 8 and 15 as integration fixtures.
+- Preserve provider-neutral selected OCR source, source-integrity evidence, and existing provider/model lock policy.
+- Use TDD, performance budgets, and artifact-safe diagnostics; do not add full-page multi-angle OCR.
+# Review Remediation and Safe Provider Concurrency (2026-07-13)
+
+- Fix durable cancellation, Groq recovery, DeepSeek ordered context/concurrency, OCR quadrilateral validation, and polling generation isolation from the review findings.
+- Keep DeepSeek Flash concurrency at 6 and Pro concurrency at 3: both are well below the provider limits (2,500 and 500 respectively), while preserving the existing fast batch throughput.
+- Add regression coverage before each fix, then run backend/frontend verification and push the validated changes.

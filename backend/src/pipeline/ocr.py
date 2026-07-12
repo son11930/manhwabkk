@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, List
 import asyncio
+import re
+import math
 
 import cv2
 import numpy as np
@@ -16,9 +18,10 @@ class MangaOCREngine:
         import os
         for env_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
             if env_key not in os.environ:
-                os.environ[env_key] = "2"
+                os.environ[env_key] = "1"
+        os.environ.setdefault("OMP_THREAD_LIMIT", "1")
         try:
-            cv2.setNumThreads(2)
+            cv2.setNumThreads(1)
         except Exception:
             pass
         try:
@@ -34,6 +37,99 @@ class MangaOCREngine:
     def _is_glued_text(text: str) -> bool:
         return any(len(token) >= 12 for token in text.split() if token.isupper())
 
+    @staticmethod
+    def _polygon_angle(polygon: tuple | list) -> int:
+        points = MangaOCREngine._ordered_quad(polygon)
+        if points is None:
+            return 0
+        angle = math.degrees(math.atan2(float(points[1][1] - points[0][1]), float(points[1][0] - points[0][0])))
+        return int(round(((angle + 90) % 180) - 90))
+
+    @staticmethod
+    def _ordered_quad(polygon: tuple | list) -> np.ndarray | None:
+        """Validate and canonicalize detector points before perspective warping."""
+        points = np.asarray(polygon, dtype=np.float32)
+        if points.shape != (4, 2) or not np.isfinite(points).all():
+            return None
+        sums = points.sum(axis=1)
+        diffs = np.diff(points, axis=1).reshape(-1)
+        indices = (int(np.argmin(sums)), int(np.argmin(diffs)), int(np.argmax(sums)), int(np.argmax(diffs)))
+        if len(set(indices)) != 4:
+            return None
+        ordered = points[list(indices)]
+        if not cv2.isContourConvex(ordered.reshape((-1, 1, 2))) or abs(cv2.contourArea(ordered)) < 100:
+            return None
+        return ordered
+
+    @staticmethod
+    def _candidate_score(text: str, confidence: float) -> float:
+        letters = len(re.findall(r"[A-Za-z]", text or ""))
+        preserved_marks = len(re.findall(r"['-]|!{2,}|\?", text or ""))
+        return float(confidence) + min(letters, 40) * 0.002 + preserved_marks * 0.03
+
+    @staticmethod
+    def _deskew_roi(image: np.ndarray, polygon: tuple | list) -> np.ndarray | None:
+        points = MangaOCREngine._ordered_quad(polygon)
+        if points is None:
+            return None
+        image_height, image_width = image.shape[:2]
+        if np.any(points[:, 0] < 0) or np.any(points[:, 1] < 0) or np.any(points[:, 0] >= image_width) or np.any(points[:, 1] >= image_height):
+            return None
+        width_top = np.linalg.norm(points[1] - points[0])
+        width_bottom = np.linalg.norm(points[2] - points[3])
+        height_left = np.linalg.norm(points[3] - points[0])
+        height_right = np.linalg.norm(points[2] - points[1])
+        width, height = int(round(max(width_top, width_bottom))), int(round(max(height_left, height_right)))
+        if width < 10 or height < 10 or width / max(height, 1) > 12 or width * height > 350_000:
+            return None
+        target = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=np.float32)
+        matrix = cv2.getPerspectiveTransform(points, target)
+        roi = cv2.warpPerspective(image, matrix, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        return cv2.copyMakeBorder(roi, 12, 12, 12, 12, cv2.BORDER_REPLICATE)
+
+    @staticmethod
+    def _group_lines(lines: list[dict[str, Any]], page_width: int, page_height: int) -> list[dict[str, Any]]:
+        """Group neighbouring text lines inside the same speech bubble."""
+        grouped: list[dict[str, Any]] = []
+        max_area = max(page_width * page_height * 0.25, 1)
+        for line in sorted(lines, key=lambda value: (value["top"], value["left"])):
+            matched_group: dict[str, Any] | None = None
+            matched_score = float("-inf")
+            for group in grouped:
+                vertical_gap = line["top"] - group["last_bottom"]
+                prev_line_height = max(group["last_bottom"] - group["last_top"], 15)
+                curr_line_height = max(line["bottom"] - line["top"], 15)
+                group_center = (group["left"] + group["right"]) / 2
+                line_center = (line["left"] + line["right"]) / 2
+                max_width = max(group["right"] - group["left"], line["right"] - line["left"], 40)
+                overlap_width = max(0, min(group["right"], line["right"]) - max(group["left"], line["left"]))
+                same_bubble = (
+                    -curr_line_height * 0.8 <= vertical_gap <= max(prev_line_height * 1.6, curr_line_height * 1.6, 55)
+                    and (overlap_width > 0 or abs(group_center - line_center) <= max_width * 0.75)
+                )
+                left, top = min(group["left"], line["left"]), min(group["top"], line["top"])
+                right, bottom = max(group["right"], line["right"]), max(group["bottom"], line["bottom"])
+                score = overlap_width - abs(group_center - line_center)
+                if same_bubble and (right - left) * (bottom - top) <= max_area and score > matched_score:
+                    matched_group = group
+                    matched_score = score
+            if matched_group is None:
+                matched_group = dict(line)
+                matched_group["last_top"] = line["top"]
+                matched_group["last_bottom"] = line["bottom"]
+                matched_group["raw_lines"] = []
+                matched_group["confidences"] = []
+                grouped.append(matched_group)
+            matched_group["left"] = min(matched_group["left"], line["left"])
+            matched_group["top"] = min(matched_group["top"], line["top"])
+            matched_group["right"] = max(matched_group["right"], line["right"])
+            matched_group["bottom"] = max(matched_group["bottom"], line["bottom"])
+            matched_group["last_top"] = line["top"]
+            matched_group["last_bottom"] = line["bottom"]
+            matched_group["raw_lines"].append(line["text"])
+            matched_group["confidences"].append(line["confidence"])
+        return grouped
+
     def detect_and_extract_sync(self, image_bytes: bytes, page_index: int = 0) -> List[OCRSegment]:
         if not self.is_ready or not image_bytes:
             return []
@@ -42,6 +138,7 @@ class MangaOCREngine:
             image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
             if image is None:
                 return []
+            original_height, original_width = image.shape[:2]
 
             scale = 1.0
             if image.shape[1] > 2400:
@@ -70,32 +167,51 @@ class MangaOCREngine:
                     "bottom": bottom,
                     "text": raw_text,
                     "confidence": raw_confidence,
+                    "polygon": tuple(tuple(float(value) for value in point) for point in polygon),
                 })
 
-            # Comic lettering often uses a small, stylized font that the normal
-            # detector misses entirely. Retry on an enlarged, contrast-normalized
-            # image and merge only distinct regions into the same OCR evidence.
+            # Comic lettering can be slanted. Repair only a few low-confidence
+            # detected ROIs; a full-page enhanced pass is reserved for no text.
             enhanced_scale = 1.0
             enhanced_result = []
-            enhanced_scale = min(3.0, max(1.0, 1800.0 / max(image.shape[:2])))
-            enhanced = cv2.resize(
-                image,
-                (0, 0),
-                fx=enhanced_scale,
-                fy=enhanced_scale,
-                interpolation=cv2.INTER_CUBIC,
-            )
-            enhanced_gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-            enhanced_gray = cv2.adaptiveThreshold(
-                enhanced_gray,
-                255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY,
-                31,
-                9,
-            )
-            enhanced_response = self.ocr_engine(cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR))
-            enhanced_result = enhanced_response[0] if isinstance(enhanced_response, tuple) else enhanced_response
+            needs_recovery = not lines or sum(1 for line in lines if line["confidence"] < 0.65) >= max(1, len(lines) // 4)
+            if lines and needs_recovery:
+                for line in sorted((item for item in lines if item["confidence"] < 0.65), key=lambda item: item["confidence"])[:4]:
+                    angle = self._polygon_angle(line["polygon"])
+                    if not 2 <= abs(angle) <= 20:
+                        continue
+                    roi = self._deskew_roi(image, line["polygon"])
+                    if roi is None:
+                        continue
+                    roi_response = self.ocr_engine(roi)
+                    roi_results = roi_response[0] if isinstance(roi_response, tuple) else roi_response
+                    if not roi_results:
+                        continue
+                    best = max(roi_results, key=lambda item: float(item[2]))
+                    candidate_text, candidate_confidence = str(best[1]).strip(), float(best[2])
+                    if candidate_text and candidate_confidence >= line["confidence"] + 0.10 and self._candidate_score(candidate_text, candidate_confidence) > self._candidate_score(line["text"], line["confidence"]):
+                        line["text"] = candidate_text
+                        line["confidence"] = candidate_confidence
+            elif needs_recovery:
+                enhanced_scale = min(3.0, max(1.0, 1800.0 / max(image.shape[:2])))
+                enhanced = cv2.resize(
+                    image,
+                    (0, 0),
+                    fx=enhanced_scale,
+                    fy=enhanced_scale,
+                    interpolation=cv2.INTER_CUBIC,
+                )
+                enhanced_gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+                enhanced_gray = cv2.adaptiveThreshold(
+                    enhanced_gray,
+                    255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY,
+                    31,
+                    9,
+                )
+                enhanced_response = self.ocr_engine(cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR))
+                enhanced_result = enhanced_response[0] if isinstance(enhanced_response, tuple) else enhanced_response
 
             def overlapping_index(candidate: dict[str, Any]) -> int | None:
                 for index, existing in enumerate(lines):
@@ -134,53 +250,27 @@ class MangaOCREngine:
             if not lines:
                 return []
 
-            grouped: list[dict[str, Any]] = []
-            current = dict(sorted(lines, key=lambda line: (line["top"], line["left"]))[0])
-            current["raw_lines"] = [current["text"]]
-            current["confidences"] = [current["confidence"]]
-            for line in sorted(lines, key=lambda value: (value["top"], value["left"]))[1:]:
-                vertical_gap = line["top"] - current["bottom"]
-                current_height = max(current["bottom"] - current["top"], 15)
-                line_height = max(line["bottom"] - line["top"], 15)
-                ref_height = max(current_height, line_height)
-                current_center = (current["left"] + current["right"]) / 2
-                line_center = (line["left"] + line["right"]) / 2
-                max_width = max(current["right"] - current["left"], line["right"] - line["left"], 40)
-                horizontal_overlap = max(current["left"], line["left"]) < min(current["right"], line["right"])
-                same_bubble = (vertical_gap <= ref_height * 1.8) and (
-                    horizontal_overlap or abs(current_center - line_center) <= max_width * 0.75
-                )
-                if same_bubble:
-                    current["left"] = min(current["left"], line["left"])
-                    current["top"] = min(current["top"], line["top"])
-                    current["right"] = max(current["right"], line["right"])
-                    current["bottom"] = max(current["bottom"], line["bottom"])
-                    current["raw_lines"].append(line["text"])
-                    current["confidences"].append(line["confidence"])
-                else:
-                    grouped.append(current)
-                    current = dict(line)
-                    current["raw_lines"] = [line["text"]]
-                    current["confidences"] = [line["confidence"]]
-            grouped.append(current)
-
-            segments: list[OCRSegment] = []
-            for reading_order, item in enumerate(sorted(grouped, key=lambda value: (value["top"], value["left"])), start=1):
-                raw_lines = tuple(item["raw_lines"])
-                source_text = " ".join(raw_lines).strip()
-                segments.append(OCRSegment(
-                    segment_id=f"{page_index}:{reading_order}",
-                    page_index=page_index,
-                    reading_order=reading_order,
+            grouped = self._group_lines(lines, original_width, original_height)
+            return [
+                OCRSegment(
+                    segment_id=f"{page_index}:{reading_order}", page_index=page_index, reading_order=reading_order,
                     box=(item["left"], item["top"], item["right"], item["bottom"]),
-                    raw_lines=raw_lines,
-                    source_text=source_text,
+                    raw_lines=tuple(item["raw_lines"]),
+                    source_text=self._normalize_ocr_reading(" ".join(item["raw_lines"])),
                     confidence=min(item["confidences"]),
-                ))
-            return segments
+                )
+                for reading_order, item in enumerate(sorted(grouped, key=lambda value: (value["top"], value["left"])), start=1)
+            ]
         except Exception as error:
             print(f"[OCR Error] {error}")
             return []
+
+    @staticmethod
+    def _normalize_ocr_reading(text: str) -> str:
+        """Universal OCR text normalization for all manga/manhwa."""
+        cleaned = text.strip()
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        return cleaned
 
     async def detect_and_extract(self, image_bytes: bytes, page_index: int = 0) -> List[OCRSegment]:
         return await asyncio.to_thread(self.detect_and_extract_sync, image_bytes, page_index)

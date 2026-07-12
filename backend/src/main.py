@@ -11,12 +11,19 @@ if sys.platform == "win32":
     try:
         import ctypes
         kernel32 = ctypes.windll.kernel32
-        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
-        mode = ctypes.c_ulong()
-        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-            mode.value &= ~0x0040  # Disable ENABLE_QUICK_EDIT_MODE
-            mode.value |= 0x0080   # Enable ENABLE_EXTENDED_FLAGS
-            kernel32.SetConsoleMode(handle, mode)
+        for std_id in (-10, -11, -12):
+            handle = kernel32.GetStdHandle(std_id)
+            mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                mode.value &= ~0x0040  # Disable ENABLE_QUICK_EDIT_MODE
+                mode.value |= 0x0080   # Enable ENABLE_EXTENDED_FLAGS
+                kernel32.SetConsoleMode(handle, mode)
+        # Prevent Windows 11 Efficiency Mode / background throttling when minimized or unfocused
+        NORMAL_PRIORITY_CLASS = 0x00000020
+        kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), NORMAL_PRIORITY_CLASS)
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
     except Exception:
         pass
 from fastapi.responses import JSONResponse
@@ -31,11 +38,29 @@ from src.domains.auth.router import router as auth_router
 from src.domains.manga.router import router as manga_router
 from src.domains.jobs.router import router as jobs_router
 
+def _sync_migrate(connection):
+    from sqlalchemy import inspect, text
+    inspector = inspect(connection)
+    if "translation_jobs" in inspector.get_table_names():
+        columns = {col["name"] for col in inspector.get_columns("translation_jobs")}
+        new_cols = [
+            ("translation_provider", "VARCHAR(50) DEFAULT 'groq'"),
+            ("requested_model", "VARCHAR(100)"),
+            ("actual_model", "VARCHAR(100)"),
+            ("input_tokens", "INTEGER DEFAULT 0"),
+            ("output_tokens", "INTEGER DEFAULT 0"),
+            ("cost_estimate_usd", "FLOAT DEFAULT 0.0"),
+        ]
+        for col_name, col_type in new_cols:
+            if col_name not in columns:
+                connection.execute(text(f"ALTER TABLE translation_jobs ADD COLUMN {col_name} {col_type}"))
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: create tables for local MVP if not exists
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_sync_migrate)
     
     # Initialize default Super Admin
     async with async_session_maker() as session:

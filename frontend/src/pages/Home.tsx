@@ -84,7 +84,7 @@ export const Home: React.FC = () => {
         <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-accent-cyan/15 blur-[120px] rounded-full pointer-events-none"></div>
         
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10 text-center">
-          <div className="inline-flex items-center space-x-2 px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-accent-cyan text-xs font-bold mb-6 backdrop-blur-md animate-pulse">
+          <div className="inline-flex items-center space-x-2 px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-accent-cyan text-xs font-bold mb-6 backdrop-blur-md">
             <Sparkles className="w-4 h-4" />
             <span>AI TRANSLATION PLATFORM สำหรับคนรักการ์ตูน</span>
           </div>
@@ -129,7 +129,7 @@ export const Home: React.FC = () => {
         </div>
 
         {loading ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 animate-pulse">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {[1, 2, 3].map((n) => (
               <div key={n} className="h-80 rounded-2xl bg-dark-800 border border-gray-800"></div>
             ))}

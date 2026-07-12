@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sparkles, Link as LinkIcon, CheckCircle2, Loader2, AlertTriangle, ArrowRight } from 'lucide-react';
 import { AdSlot } from '../components/AdSlot';
@@ -8,7 +8,7 @@ interface JobStatus {
   source_url: string;
   manga_slug?: string;
   chapter_number?: string;
-  status: 'PENDING' | 'SCRAPING' | 'TRANSLATING' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'SHADOW_COMPLETED' | 'FAILED';
+  status: 'PENDING' | 'SCRAPING' | 'TRANSLATING' | 'QUALITY_CHECKING' | 'NEEDS_REVIEW' | 'COMPLETED' | 'COMPLETED_WITH_WARNINGS' | 'SHADOW_COMPLETED' | 'FAILED' | 'CANCELLED';
   progress_percent: number;
   error_message?: string;
   translation_provider?: string;
@@ -24,6 +24,10 @@ export const SubmitJob: React.FC = () => {
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pollIntervalRef = useRef<number | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const pollInFlightRef = useRef(false);
+  const pollGenerationRef = useRef(0);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -32,7 +36,22 @@ export const SubmitJob: React.FC = () => {
     if (savedJobId) {
       pollJobProgress(savedJobId, savedJobUrl || '');
     }
+    return () => stopPolling();
+    // pollJobProgress intentionally starts once on mount; the poller itself
+    // owns replacement and cleanup for subsequent jobs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const stopPolling = () => {
+    pollGenerationRef.current += 1;
+    if (pollIntervalRef.current !== null) {
+      window.clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    pollAbortRef.current?.abort();
+    pollAbortRef.current = null;
+    pollInFlightRef.current = false;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,50 +82,85 @@ export const SubmitJob: React.FC = () => {
 
       // Poll real backend worker progress
       pollJobProgress(jobId, sourceUrl);
-    } catch (err: any) {
-      // For demonstration if API offline, simulate realistic progress
-      const mockId = "mock-job-" + Date.now();
-      setJobStatus({
-        id: mockId,
-        source_url: sourceUrl,
-        status: 'PENDING',
-        progress_percent: 0
-      });
-      simulateProgress(mockId, sourceUrl);
+    } catch {
+      setError('Unable to create translation job. Please check the connection and try again.');
     } finally {
       setSubmitting(false);
     }
   };
 
   const pollJobProgress = (id: string, url: string) => {
+    stopPolling();
+    const generation = pollGenerationRef.current;
     const { manga_slug, chapter_number } = parseUrlToSlugAndChapter(url);
-    const interval = setInterval(async () => {
+    const poll = async () => {
+      if (generation !== pollGenerationRef.current) return;
+      if (pollInFlightRef.current) return;
+      pollInFlightRef.current = true;
+      const controller = new AbortController();
+      pollAbortRef.current = controller;
       try {
-        const res = await fetch(`/api/v1/jobs/${id}`);
+        const res = await fetch(`/api/v1/jobs/${id}`, { signal: controller.signal });
+        if (generation !== pollGenerationRef.current) return;
         if (res.ok) {
           const json = await res.json();
           const data = json.data;
           if (data) {
-            setJobStatus({
-              ...data,
-              manga_slug: data.manga_slug || manga_slug,
-              chapter_number: data.chapter_number || chapter_number
+            setJobStatus((previous) => {
+              const next = {
+                ...data,
+                manga_slug: data.manga_slug || manga_slug,
+                chapter_number: data.chapter_number || chapter_number,
+                progress_percent: previous?.id === data.id ? Math.max(previous?.progress_percent ?? 0, data.progress_percent) : data.progress_percent,
+              };
+              return previous && previous.id === next.id && previous.status === next.status
+                && previous.progress_percent === next.progress_percent
+                && previous.manga_slug === next.manga_slug
+                && previous.chapter_number === next.chapter_number
+                ? previous : next;
             });
-            if (['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(data.status)) {
+            if (['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED', 'CANCELLED'].includes(data.status)) {
               localStorage.removeItem('active_job_id');
               localStorage.removeItem('active_job_url');
-              clearInterval(interval);
+              stopPolling();
             }
           }
         } else if (res.status === 404) {
           localStorage.removeItem('active_job_id');
           localStorage.removeItem('active_job_url');
-          clearInterval(interval);
+          stopPolling();
         }
-      } catch {
-        // Ignore network errors during polling
+      } catch (error) {
+        if ((error as DOMException).name !== 'AbortError') {
+          setError('Connection interrupted while tracking this job. Retrying...');
+        }
+      } finally {
+        if (generation === pollGenerationRef.current) {
+          pollInFlightRef.current = false;
+          if (pollAbortRef.current === controller) pollAbortRef.current = null;
+        }
       }
-    }, 2000);
+    };
+    void poll();
+    pollIntervalRef.current = window.setInterval(() => void poll(), 2000);
+  };
+
+  const handleCancelJob = async () => {
+    if (!jobStatus) return;
+    try {
+      const response = await fetch(`/api/v1/jobs/${jobStatus.id}/cancel`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        throw new Error('Cancel request was rejected');
+      }
+      setJobStatus({ ...jobStatus, status: 'CANCELLED' });
+      localStorage.removeItem('active_job_id');
+      localStorage.removeItem('active_job_url');
+      stopPolling();
+    } catch {
+      setError('Unable to cancel this job. Please try again.');
+    }
   };
 
   const parseUrlToSlugAndChapter = (url: string) => {
@@ -132,50 +186,24 @@ export const SubmitJob: React.FC = () => {
     }
   };
 
-  const simulateProgress = (id: string, url: string) => {
-    let progress = 0;
-    const { manga_slug, chapter_number } = parseUrlToSlugAndChapter(url);
-    const interval = setInterval(() => {
-      progress += Math.floor(Math.random() * 15) + 10;
-      if (progress >= 100) {
-        progress = 100;
-        clearInterval(interval);
-        setJobStatus({
-          id,
-          source_url: url,
-          manga_slug,
-          chapter_number,
-          status: 'COMPLETED',
-          progress_percent: 100
-        });
-      } else {
-        const status = progress < 30 ? 'SCRAPING' : 'TRANSLATING';
-        setJobStatus({
-          id,
-          source_url: url,
-          manga_slug,
-          chapter_number,
-          status: status as any,
-          progress_percent: progress
-        });
-      }
-    }, 1200);
-  };
-
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'PENDING':
         return <span className="px-3 py-1 rounded-full text-xs font-bold bg-gray-500/20 text-gray-400 border border-gray-500/30">⏳ กำลังรอคิว</span>;
       case 'SCRAPING':
-        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30 animate-pulse">🕸️ กำลังดึงภาพและตัดคำ...</span>;
+        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30">🕸️ กำลังดึงภาพและตัดคำ...</span>;
       case 'TRANSLATING':
-        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30 animate-pulse">🧠 AI Groq กำลังแปลและถมพื้นหลัง...</span>;
+        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30">🧠 AI กำลังแปลและถมพื้นหลัง...</span>;
       case 'QUALITY_CHECKING':
-        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse">🔍 AI กำลังตรวจสอบคุณภาพและฝังคำแปลไทย...</span>;
+        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">🔍 AI กำลังตรวจสอบคุณภาพและฝังคำแปลไทย...</span>;
       case 'COMPLETED':
       case 'COMPLETED_WITH_WARNINGS':
       case 'SHADOW_COMPLETED':
         return <span className="px-3 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30">✅ แปลสำเร็จเรียบร้อย!</span>;
+      case 'NEEDS_REVIEW':
+        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">Review required</span>;
+      case 'CANCELLED':
+        return <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">⏹️ ยกเลิกการแปลแล้ว</span>;
       default:
         return <span className="px-3 py-1 rounded-full text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30">❌ เกิดข้อผิดพลาด</span>;
     }
@@ -217,7 +245,7 @@ export const SubmitJob: React.FC = () => {
                   onChange={(e) => setSourceUrl(e.target.value)}
                   placeholder="https://example.com/manga/solo-leveling/chapter-1"
                   className="w-full pl-11 pr-4 py-4 rounded-2xl bg-dark-900/80 border border-gray-700 text-white placeholder-gray-500 focus:outline-none focus:border-accent-cyan focus:ring-2 focus:ring-accent-cyan/20 transition-all text-sm sm:text-base font-medium"
-                  disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(jobStatus.status))}
+                  disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED', 'CANCELLED'].includes(jobStatus.status))}
                 />
               </div>
               {error && (
@@ -259,7 +287,7 @@ export const SubmitJob: React.FC = () => {
               <select
                 value={translationProvider}
                 onChange={(e) => setTranslationProvider(e.target.value)}
-                disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(jobStatus.status))}
+                disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED', 'CANCELLED'].includes(jobStatus.status))}
                 className="w-full px-4 py-3.5 rounded-2xl bg-dark-900/80 border border-gray-700 text-white focus:outline-none focus:border-accent-cyan focus:ring-2 focus:ring-accent-cyan/20 transition-all text-sm sm:text-base font-medium"
               >
                 <option value="groq">⚡ Groq Fast & Compound Router (ฟรี / ความเร็วสูง)</option>
@@ -271,7 +299,7 @@ export const SubmitJob: React.FC = () => {
 
             <button
               type="submit"
-              disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED'].includes(jobStatus.status))}
+              disabled={submitting || (jobStatus !== null && !['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED', 'CANCELLED'].includes(jobStatus.status))}
               className="w-full py-4 rounded-2xl bg-gradient-to-r from-accent-purple via-accent-blue to-accent-cyan text-white font-extrabold text-sm sm:text-base flex items-center justify-center space-x-2 shadow-xl hover:shadow-2xl hover:scale-[1.01] active:scale-[0.99] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {submitting ? (
@@ -324,6 +352,27 @@ export const SubmitJob: React.FC = () => {
                   <div className="flex items-center space-x-4 font-mono">
                     <span className="text-gray-300">Tokens: {((jobStatus.input_tokens || 0) + (jobStatus.output_tokens || 0)).toLocaleString()}</span>
                     <span className="text-green-400 font-bold">Cost: ${Number(jobStatus.cost_estimate_usd || 0).toFixed(5)} USD</span>
+                  </div>
+                </div>
+              )}
+
+              {!['COMPLETED', 'COMPLETED_WITH_WARNINGS', 'SHADOW_COMPLETED', 'FAILED', 'CANCELLED'].includes(jobStatus.status) && (
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="button"
+                    onClick={handleCancelJob}
+                    className="px-4 py-2.5 rounded-xl bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/40 font-bold text-xs flex items-center space-x-2 transition-all shadow-md"
+                  >
+                    <span>⏹️ หยุดการแปล / ยกเลิกงานนี้ทันที (Stop / Cancel)</span>
+                  </button>
+                </div>
+              )}
+
+              {jobStatus.status === 'CANCELLED' && (
+                <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between">
+                  <div>
+                    <h4 className="text-sm font-bold text-amber-400">หยุดการแปลเรียบร้อยแล้ว</h4>
+                    <p className="text-xs text-gray-300">คุณสามารถเลือกโหมดอื่นหรือส่งลิงก์ใหม่ได้ทันทีครับ</p>
                   </div>
                 </div>
               )}

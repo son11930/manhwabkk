@@ -14,7 +14,7 @@ export const Navbar: React.FC = () => {
           {/* Logo */}
           <Link to="/" className="flex items-center space-x-3 group">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-accent-cyan via-accent-blue to-accent-purple flex items-center justify-center shadow-lg group-hover:scale-105 transition-transform">
-              <Sparkles className="w-6 h-6 text-dark-900 animate-pulse" />
+              <Sparkles className="w-6 h-6 text-dark-900" />
             </div>
             <div>
               <span className="text-xl font-black glow-text tracking-wider">
@@ -48,7 +48,7 @@ export const Navbar: React.FC = () => {
                   : 'text-gray-300 hover:text-white hover:bg-white/5'
               }`}
             >
-              <PlusCircle className="w-4 h-4 text-accent-pink animate-bounce" />
+              <PlusCircle className="w-4 h-4 text-accent-pink" />
               <span className="bg-gradient-to-r from-accent-pink to-accent-purple bg-clip-text text-transparent font-bold">
                 สั่งแปลตอนใหม่
               </span>

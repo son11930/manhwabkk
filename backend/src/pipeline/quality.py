@@ -61,9 +61,17 @@ class TranslationQualityGate:
         if source_numbers != target_numbers:
             issues.append("NUMBER_MISMATCH")
 
-        source_ranks = [value.upper() for value in re.findall(
-            r"\b(?:rank|level|class|grade)\s*[-:]?\s*([A-FS])\b", source, re.I
-        )]
+        rank_matches = re.findall(
+            r"\b(?:rank|level|class|grade)\s*[-:]?\s*([A-FS]{1,3})\b|\b([A-FS]{1,3})\s*[-:]?\s*(?:rank|level|class|grade)\b|\b([A-FS]{1,3})-(?:rank|level|class|grade)\b",
+            source,
+            re.I,
+        )
+        source_ranks = [r.upper() for tup in rank_matches for r in tup if r]
+        # Only match uppercase single letters B-F, S as ranks when rank keyword is present (exclude article 'a' / 'A')
+        if re.search(r"\b(?:rank|level|class|grade)\b", source, re.I):
+            for token in re.findall(r"\b([B-FS])\b", source):
+                if token.isupper():
+                    source_ranks.append(token.upper())
         if source_ranks:
             target_ranks = [value.upper() for value in re.findall(r"(?<![A-Za-z])([A-FS])(?![A-Za-z])", target, re.I)]
             thai_rank_map = {"A": "เอ", "B": "บี", "C": "ซี", "D": "ดี", "E": "อี", "F": "เอฟ", "S": "เอส"}
@@ -83,6 +91,13 @@ class TranslationQualityGate:
             issues.append("AMBIGUOUS_TERM_REVIEW")
 
         for term in glossary:
+            if str(term.get("gender", "")).lower() == "female":
+                source_term = str(term.get("source", "")).strip()
+                aliases = tuple(str(alias) for alias in term.get("aliases", ()) or ())
+                if any(alias and alias.lower() in source.lower() for alias in (source_term, *aliases)):
+                    if any(pronoun in target for pronoun in ("นาย", "เขา")):
+                        issues.append("PRONOUN_GENDER_MISMATCH")
+                        break
             if not bool(term.get("locked")):
                 continue
             source_term = str(term.get("source", "")).strip()
@@ -94,8 +109,12 @@ class TranslationQualityGate:
                     issues.append("LOCKED_TERM_MISMATCH")
                     break
 
-        ascii_words = re.findall(r"[A-Za-z]{2,}", target)
-        if ascii_words:
+        ascii_words = re.findall(r"[A-Za-z]+", target)
+        permitted_rank_letters = set(source_ranks) | {
+            "A", "B", "C", "D", "E", "F", "S", "EX", "SS", "SSS",
+            "RPG", "NPC", "CEO", "VIP", "STATUS", "LEVEL", "RANK", "MAX", "HP", "MP", "EXP"
+        }
+        if any(word.upper() not in permitted_rank_letters for word in ascii_words):
             issues.append("ENGLISH_LEAKAGE")
 
         source_letters = sum(character.isascii() and character.isalpha() for character in source)

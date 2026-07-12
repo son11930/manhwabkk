@@ -98,51 +98,32 @@ VETERAN_TRANSLATOR_SYSTEM_PROMPT = (
     "   - 'Then I'll be a D level?' / 'Then I'll be X' -> translate as deciding/choosing a rank: 'งั้น... ฉันเป็นระดับ D ก็แล้วกัน?' or 'งั้นเอาเป็นระดับ D ก็แล้วกัน?' (NEVER mistranslate as 'แล้วฉันจะแค่ระดับ D เหรอ?').\n"
     "   - Action & Idioms: 'call their hometown' / 'call on their hometown' -> 'บุกไปถึงถิ่น / บุกไปถึงบ้านเกิด' (never literal telephone 'โทรไปบ้านเกิด'); 'settle the bills / settle accounts / settle all the bills' -> 'คิดบัญชีแค้น / สะสางหนี้แค้น' (never literal utility bills).\n"
     "   - Multi-bubble Scene Cohesion: Always translate consecutive speech boxes so they connect logically in context. 'YOU'RE THE BEST!' / 'YOU ARE THE BEST' after a show-off/question -> 'สุดยอดไปเลยใช่ไหมล่ะ! / เจ๋งที่สุดเลยใช่ไหมล่ะ!' (never literal 'นายเป็นคนดีที่สุด').\n"
-    "5. Terminology: Awakening/Awaken -> 'ตื่นรู้' (or 'การตื่นรู้'); Awakened/Awakener -> 'ผู้ตื่นรู้'; Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง'); Aura/Spiritual Aura -> 'กระแสพลัง' or 'พลังวิญญาณ' (NEVER clipped/hallucinated 'พลังอำ'); Eye of Ruin/Eye of Formation -> 'แกนกลางซากปรักหักพัง' or 'จุดศูนย์กลางซากปรักหักพัง' (never literal 'ดวงตาของซากปรักหักพัง').\n"
+    "5. Terminology: Ruins -> 'ซากปรักหักพัง' (when referring to dungeon/ancient sites, never 'ถูกทำลาย'); Awakening/Awaken -> 'ตื่นรู้' (or 'การตื่นรู้'); Awakened/Awakener -> 'ผู้ตื่นรู้'; Cultivator/Cultivation -> 'ผู้ฝึกตน' (never 'เกษตรกร'); Rank/Level breakthrough -> 'เลื่อนระดับ/ทะลวงขั้น' (never 'เลื่อนตำแหน่ง'); Aura/Spiritual Aura -> 'กระแสพลัง' or 'พลังวิญญาณ' (NEVER clipped/hallucinated 'พลังอำ'); Eye of Ruin/Eye of Formation -> 'แกนกลางซากปรักหักพัง' or 'จุดศูนย์กลางซากปรักหักพัง' (never literal 'ดวงตาของซากปรักหักพัง').\n"
     "6. Thai Spacing & Punctuation: Insert natural spaces after character names and between clauses. NEVER end Thai sentences with a period (.).\n"
     "7. Output Format: Output ONLY the translated Thai text numbered [1], [2]... No <think> tags, no commentary.\n"
     "8. Organization/Faction Terms: Garuda/迦楼罗 -> 'การูดา'; Family/Great Families/Clan -> 'ตระกูล' or 'ตระกูลใหญ่' (never 'ครอบครัว'); Dragnet/Heavenly Network -> 'เครือข่ายสวรรค์' (never 'ดรังเนต'); Unaffiliated/Rogue Cultivator -> 'ผู้ฝึกตนไร้สังกัด'.\n"
     "9. Elements & System UI: Water-type -> 'ผู้ใช้พลังธาตุน้ำ / สายธาตุน้ำ'; NEGATIVE EMOTION VALUE -> 'แต้มอารมณ์ด้านลบ / ได้รับแต้มอารมณ์ด้านลบ'.\n"
     "10. Ranks/Levels/Classes: Translate 'E-LEVEL'/Level E -> 'ระดับ E'. ONLY single uppercase letters for ranks ('A', 'B', 'C', 'D', 'E', 'S') are allowed in Thai text (never leave English words like 'LEVEL' or 'CLASS').\n"
     "11. Character Attitude & Nuance: Ensure dialogue reflects character intent accurately (e.g. scheming/choosing rank vs complaining).\n"
-    "12. Broken English Grammar Correction: Manhwa source text often has poor grammar (e.g. 'DID BOTH BROTHER AND SISTER HAVE BEEN IN RUINS BEFORE.'). NEVER translate word-for-word into gibberish ('ทั้งพี่และน้องสาวมีถูกทำลายก่อน'). Always translate the intended context into natural Thai: 'หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?'. 'ruins/ruin' = 'ซากปรักหักพัง' (never 'ถูกทำลาย').\n"
+    "12. Broken English Grammar Correction: Manhwa source text often has poor grammar (e.g. 'DID BOTH BROTHER AND SISTER HAVE BEEN IN RUINS BEFORE.'). NEVER translate word-for-word into gibberish ('ทั้งพี่และน้องสาวมีถูกทำลายก่อน'). Always translate the intended context into natural Thai: 'หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?'. 'ruins' (dungeon/ancient sites) = 'ซากปรักหักพัง' (never 'ถูกทำลาย').\n"
     "13. Translator Notes (TL/N, T/N): Always translate 'TL/N:' or 'T/N:' prefix as 'หมายเหตุผู้แปล:' and translate the entire explanatory note completely into Thai script (never leave English words or fragmented lines).\n"
     "14. Complete Sentence Translation (No Omission): NEVER summarize or omit sentences from a speech bubble. Translate every sentence completely (e.g. 'WE ALL ARE CULTIVATORS. IF WE MEET IN RUINS WE MUST HELP EACH OTHER.' -> 'พวกเราทุกคนล้วนเป็นผู้ฝึกตน หากพบกันในซากปรักหักพังก็ต้องช่วยเหลือซึ่งกันและกันนะ').\n"
     "15. Idiom 'In Ruins and Out of It': In cultivation manhwa, 'in ruins and out of it' / 'in the ruins and out of it' means 'ทั้งในและนอกซากปรักหักพัง' (NEVER mistranslate 'ruins' as financial/life ruin 'ตกต่ำ').\n"
     "16. Energy / Aura Translation: In cultivation manhwa, ALWAYS translate 'aura' / 'spiritual aura' as 'กระแสพลัง' or 'พลังวิญญาณ' (NEVER translate 'aura' as 'อำ' or 'อำนาจ').\n"
-    "STANDARD TRANSLATION EXAMPLES:\n"
-    "Q: Oh this is my sister Lu Xiaoyu, she will follow me to the ruins too\n"
-    "A: โอ้นี่น้องสาวฉันลู่เสี่ยวอวี๋ เธอจะตามฉันไปที่ซากปรักหักพังด้วย\n"
-    "Q: Lu Shu is only Level E, how could he enter the ruins?\n"
-    "A: ลู่ซู แค่ระดับ E เขาจะเข้าไปในซากปรักหักพังได้ไง\n"
-    "Q: ME? E-LEVEL? WHAT KIND OF JOKE IS THIS?\n"
-    "A: ฉันเนี่ยนะ? ระดับ E? นี่มันเรื่องตลกอะไรกัน?\n"
-    "Q: I REALLY ENVY THEM. I DON'T KNOW WHEN WE WILL REACH THE C LEVEL LET ALONE B LEVEL.\n"
-    "A: ฉันอิจฉาพวกเขาจริงๆ ไม่รู้เลยว่าเมื่อไหร่พวกเราถึงจะไปถึงระดับ C นับประสาอะไรกับระดับ B\n"
-    "Q: THE AURA IN THIS RUIN IS SO EVENLY DISTRIBUTED, HOW DO YOU DETERMINE WHICH SIDE IS THE EYE OF RUIN?\n"
-    "A: กระแสพลังในซากปรักหักพังนี้กระจายตัวอย่างสม่ำเสมอมาก นายรู้ได้ยังไงว่าฝั่งไหนคือแกนกลางของซากปรักหักพัง?\n"
-    "Q: DID BOTH BROTHER AND SISTER HAVE BEEN IN RUINS BEFORE.\n"
-    "A: หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?\n"
-    "Q: TL/N: SAN XIU (THREE STAR) IS THE AREA IN KOH CHANG ISLAND WHERE THE RUIN IS OPENED\n"
-    "A: หมายเหตุผู้แปล: ซานซิ่ว (สามดาว) คือบริเวณบนเกาะช้างที่เป็นจุดเปิดซากปรักหักพัง\n"
-    "Q: SOONER OR LATER, I WILL CALL THEIR HOMETOWN, SO I CAN SETTLE ALL THE BILLS WITH THEM.\n"
-    "A: ไม่ช้าก็เร็ว ฉันจะบุกไปถึงถิ่นของพวกมัน เพื่อคิดบัญชีแค้นทั้งหมดให้สาสม\n"
+    "17. Cultivation Weapons: ALWAYS translate 'flying dagger' / 'little flying dagger' (飞刀) as 'มีดบิน' or 'มีดบินเล็ก' (NEVER mistranslate as 'ธนูบิน' or 'ระนูบิน').\n"
+    "STANDARD TRANSLATION EXAMPLES (MULTI-GENRE):\n"
+    "Q: HE IS ONLY AN E-RANK HUNTER, HOW COULD HE ENTER THE S-RANK DUNGEON?\n"
+    "A: เขาเป็นแค่ฮันเตอร์ระดับ E จะเข้าไปในดันเจี้ยนระดับ S ได้ยังไง?\n"
+    "Q: I REALLY ENVY THEM. I DON'T KNOW WHEN WE WILL REACH C-CLASS LET ALONE B-CLASS.\n"
+    "A: ฉันอิจฉาพวกเขาจริงๆ ไม่รู้เลยว่าเมื่อไหร่พวกเราถึงจะไปถึงคลาส C นับประสาอะไรกับคลาส B\n"
+    "Q: THE SPIRITUAL AURA HERE IS SO EVENLY DISTRIBUTED.\n"
+    "A: กระแสพลังวิญญาณที่นี่กระจายตัวอย่างสม่ำเสมอมาก\n"
     "Q: HOW WAS IT? DO YOU LIKE IT?\n"
     "A: เป็นไงล่ะ? ชอบไหมล่ะ?\n"
     "Q: YOU'RE THE BEST!\n"
     "A: สุดยอดไปเลยใช่ไหมล่ะ!\n"
-    "Q: WE ALL ARE CULTIVATORS. IF WE MEET IN RUINS WE MUST HELP EACH OTHER.\n"
-    "A: พวกเราทุกคนล้วนเป็นผู้ฝึกตน หากพบกันในซากปรักหักพังก็ต้องช่วยเหลือซึ่งกันและกันนะ\n"
-    "Q: WE'LL BE COMRADES IN RUINS AND OUT OF IT.\n"
-    "A: เราจะเป็นสหายร่วมรบกันทั้งในและนอกซากปรักหักพัง\n"
-    "Q: I will go harvest benefits than waiting for ruins to open that is boring\n"
-    "A: ฉันจะไปหาผลประโยชน์ดีกว่า มัวแต่รอซากปรักหักพังเปิดมันน่าเบื่อ\n"
-    "Q: You are too stingy Li Yixiao, you have to put yourself in the same boat as everyone\n"
-    "A: นายงกมากๆ เลย หลี่อี้เซี่ยว นายต้องยัดตัวเองเข้าไปในเรือลำเดียวกันกับทุกๆ คน\n"
     "Q: SO WHAT? WHY DOES THIS MATTER TO ME?\n"
     "A: แล้วไง มันเกี่ยวอะไรกับฉันด้วยล่ะ?\n"
-    "Q: TO ME\n"
-    "A: เกี่ยวกับฉันล่ะ\n"
     "❌ AI ทื่อ: ฉันจะทำเอง\n"
     "✅ คนแปลอาชีพ: ก็แกรั้นจะให้ฉันทำเองนี่นา\n"
     "Q: You are making a fool of yourself\n"
@@ -233,6 +214,7 @@ class AITranslatorEngine:
         text = re.sub(r'ยากลำบากที่จะแย่งชิงเงิน(?:ของพวกเขา)?', 'แย่งชิงเงินได้ยาก', text)
         text = re.sub(r'เป็นคนธรรมดาทั่วไปแล้วตอนนี้', 'ตอนนี้เป็นแค่คนธรรมดาทั่วไปแล้ว', text)
         text = re.sub(r'\bเสียว\b', 'เสี่ยว', text)
+        text = re.sub(r'(?:เจ้า)?(?:ธนูบิน|ระนูบิน|ลูกศรบิน)(เล็ก|จิ๋ว)?', lambda m: f"มีดบิน{m.group(1) or ''}", text)
         # Normalize manhwa rank/class/level spellings to uppercase English letter (e.g., ระดับเอ -> ระดับ A, คลาสเอส -> คลาส S)
         rank_map = {
             "เอส": "S",
@@ -263,14 +245,8 @@ class AITranslatorEngine:
         text = re.sub(r'\bอเวกเกน\b|\bอเวกเคน\b', 'ตื่นรู้', text)
         text = re.sub(r'โทรไปบ้านเกิด', 'บุกไปถึงถิ่น', text)
         text = re.sub(r'จ่ายบิลทั้งหมดกับพวกเขา|ชำระบิลทั้งหมดกับพวกเขา', 'คิดบัญชีแค้นทั้งหมดให้สาสม', text)
-        text = re.sub(r'(?:ทำไมเรื่องนี้|เรื่องนี้)\s*TO\s*ME\b', 'เรื่องนี้ต้องเกี่ยวกับฉันด้วย', text, flags=re.IGNORECASE)
-        text = re.sub(r'\bTO\s*ME\b', 'เกี่ยวกับฉันล่ะ', text)
-        text = re.sub(r'\bFOR\s*ME\b', 'สำหรับฉัน', text)
-        text = re.sub(r'\bWITH\s*ME\b', 'กับฉัน', text)
-        text = re.sub(r'นายเป็นคนดีที่สุด(!|\.|$)?', r'สุดยอดไปเลยใช่ไหมล่ะ\1', text)
         text = re.sub(r'อืม\.\.\s*ฉันจะเป็นระดับ\s*D\s*หรือไง\?', 'เหอะ.. คิดว่าฉันเป็นแค่ระดับ D หรือไง?', text)
         text = re.sub(r'\b(?:TL/N|T/N|TL\\N)\s*:\s*', 'หมายเหตุผู้แปล: ', text, flags=re.IGNORECASE)
-        text = re.sub(r'ทั้งพี่และ\s*น้องสาวมี\s*ถูกทำลาย\s*ก่อน', 'หรือว่าทั้งสองพี่น้องเคยเข้าไปในซากปรักหักพังมาก่อน!?', text)
         text = re.sub(r'พลังอำ(?:นาจ)?ใน', 'กระแสพลังใน', text)
         text = re.sub(r'พลังอำ', 'กระแสพลัง', text)
         text = re.sub(r'ดวงตาของซากปรักหักพัง|ดวงตาซากปรักหักพัง', 'แกนกลางของซากปรักหักพัง', text)
@@ -333,7 +309,8 @@ class AITranslatorEngine:
             if re.match(r'^(note:|explanation:|translation:|context:|here is|correction:|หมายเหตุ|คำอธิบาย).*', stripped, flags=re.IGNORECASE):
                 continue
             ascii_count = sum(c.isalpha() and c.isascii() for c in stripped)
-            if ascii_count > 20:
+            has_thai = any('\u0e00' <= c <= '\u0e7f' for c in stripped)
+            if ascii_count > 20 and not has_thai:
                 continue
             clean_lines.append(stripped)
             

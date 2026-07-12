@@ -31,3 +31,13 @@ class JobService:
             "progress_percent": progress,
             "error_message": error
         })
+
+    async def cancel_job(self, job_id: str) -> TranslationJob:
+        job = await self.repo.find_by_id(job_id)
+        if not job:
+            raise NotFoundError("TranslationJob", job_id)
+        updated = await self.repo.update(job_id, {
+            "status": "CANCELLED",
+            "error_message": "ผู้ใช้งานยกเลิกการทำงานของระบบแปลภาษา (User cancelled translation job)"
+        })
+        return updated or job

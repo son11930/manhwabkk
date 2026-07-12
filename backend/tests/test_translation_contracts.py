@@ -54,21 +54,22 @@ def test_ocr_engine_emits_structured_segments_with_grouped_raw_line_evidence():
     image.save(image_bytes, format="JPEG")
     engine = MangaOCREngine.__new__(MangaOCREngine)
     engine.is_ready = True
-    engine.ocr_engine = lambda _image: (
-        [
+    def fake_ocr(image_array):
+        factor = image_array.shape[1] // 300
+        return ([
             (
-                ((20, 20), (200, 20), (200, 45), (20, 45)),
+                tuple((x * factor, y * factor) for x, y in ((20, 20), (200, 20), (200, 45), (20, 45))),
                 "FIRST LINE",
                 0.91,
             ),
             (
-                ((22, 48), (198, 48), (198, 73), (22, 73)),
+                tuple((x * factor, y * factor) for x, y in ((22, 48), (198, 48), (198, 73), (22, 73))),
                 "SECOND LINE",
                 0.73,
             ),
-        ],
-        None,
-    )
+        ], None)
+
+    engine.ocr_engine = fake_ocr
 
     segments = engine.detect_and_extract_sync(image_bytes.getvalue(), page_index=7)
 
@@ -80,6 +81,96 @@ def test_ocr_engine_emits_structured_segments_with_grouped_raw_line_evidence():
     assert segments[0].source_text == "FIRST LINE SECOND LINE"
     assert segments[0].confidence == pytest.approx(0.73)
     assert segments[0].box == (20, 20, 200, 73)
+
+
+def test_ocr_engine_skips_enhanced_pass_for_high_confidence_page():
+    from src.pipeline.ocr import MangaOCREngine
+
+    image = Image.new("RGB", (300, 300), color="white")
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, format="JPEG")
+    engine = MangaOCREngine.__new__(MangaOCREngine)
+    engine.is_ready = True
+
+    calls = 0
+
+    def fake_ocr(image_array):
+        nonlocal calls
+        calls += 1
+        if image_array.shape[1] == 300:
+            return ([
+                (
+                    ((20, 20), (200, 20), (200, 45), (20, 45)),
+                    "MAIN DIALOGUE",
+                    0.91,
+                ),
+            ], None)
+        raise AssertionError("enhanced OCR should not run for a complete high-confidence page")
+
+    engine.ocr_engine = fake_ocr
+
+    segments = engine.detect_and_extract_sync(image_bytes.getvalue(), page_index=7)
+
+    assert calls == 1
+    assert [segment.source_text for segment in segments] == ["MAIN DIALOGUE"]
+    assert segments[0].box == (20, 20, 200, 45)
+
+
+def test_ocr_engine_prefers_enhanced_text_for_an_overlapping_detection():
+    from src.pipeline.ocr import MangaOCREngine
+
+    image = Image.new("RGB", (300, 300), color="white")
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, format="JPEG")
+    engine = MangaOCREngine.__new__(MangaOCREngine)
+    engine.is_ready = True
+
+    def fake_ocr(image_array):
+        if image_array.shape[1] == 300:
+            return ([
+                (((20, 20), (200, 40), (200, 65), (20, 45)), "THEM!", 0.60),
+            ], None)
+        return ([
+            (((60, 60), (600, 60), (600, 135), (60, 135)), "THEM", 0.91),
+        ], None)
+
+    engine.ocr_engine = fake_ocr
+
+    segments = engine.detect_and_extract_sync(image_bytes.getvalue(), page_index=7)
+
+    assert [segment.source_text for segment in segments] == ["THEM"]
+
+
+def test_ocr_engine_keeps_interleaved_bubbles_as_complete_regions():
+    from src.pipeline.ocr import MangaOCREngine
+
+    image = Image.new("RGB", (600, 300), color="white")
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, format="JPEG")
+    engine = MangaOCREngine.__new__(MangaOCREngine)
+    engine.is_ready = True
+
+    def fake_ocr(image_array):
+        factor = image_array.shape[1] // 600
+        lines = (
+            ((20, 20, 200, 45), "LEFT ONE"),
+            ((330, 20, 510, 45), "RIGHT ONE"),
+            ((20, 50, 200, 75), "LEFT TWO"),
+            ((330, 50, 510, 75), "RIGHT TWO"),
+        )
+        return ([
+            (tuple((x * factor, y * factor) for x, y in ((left, top), (right, top), (right, bottom), (left, bottom))), text, 0.92)
+            for (left, top, right, bottom), text in lines
+        ], None)
+
+    engine.ocr_engine = fake_ocr
+
+    segments = engine.detect_and_extract_sync(image_bytes.getvalue(), page_index=7)
+
+    assert [segment.source_text for segment in segments] == [
+        "LEFT ONE LEFT TWO",
+        "RIGHT ONE RIGHT TWO",
+    ]
 
 
 def test_translation_batch_request_is_immutable_and_limits_rolling_context_to_eight():

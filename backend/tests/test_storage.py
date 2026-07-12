@@ -47,7 +47,7 @@ async def test_r2_upload_image_sets_immutable_cache(mock_r2_bucket):
     # manga-thai-storage / [manga-slug] / [chapter-number] / [page-index].jpg
     expected_key = f"{manga_slug}/{chapter_num}/{page_index}.jpg"
     expected_url = f"{settings.R2_DEV_URL}/{expected_key}"
-    assert url == expected_url
+    assert url.split('?')[0] == expected_url
 
     # Verify S3 Object metadata directly in mock bucket
     obj = mock_r2_bucket.get_object(Bucket=settings.R2_BUCKET_NAME, Key=expected_key)

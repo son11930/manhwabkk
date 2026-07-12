@@ -32,6 +32,18 @@ async def test_scraper_extracts_images_and_links():
     assert result["next_chapter_url"] == "https://example.com/manga/solo/ch-2"
     assert result["prev_chapter_url"] == "https://example.com/manga/solo/ch-0"
 
+def test_ocr_group_lines_merges_multi_line_speech_bubble():
+    """Test that centered multi-line text inside a speech bubble merges into 1 group."""
+    from src.pipeline.ocr import MangaOCREngine
+    lines = [
+        {"left": 100, "top": 200, "right": 300, "bottom": 240, "text": "HELLO, AREN'T", "confidence": 0.95},
+        {"left": 120, "top": 245, "right": 280, "bottom": 285, "text": "WE GOING", "confidence": 0.95},
+        {"left": 130, "top": 290, "right": 270, "bottom": 330, "text": "TOGETHER?", "confidence": 0.95},
+    ]
+    grouped = MangaOCREngine._group_lines(lines, page_width=1000, page_height=1500)
+    assert len(grouped) == 1
+    assert " ".join(grouped[0]["raw_lines"]) == "HELLO, AREN'T WE GOING TOGETHER?"
+
 @pytest.mark.asyncio
 async def test_ai_translator_groq_prompt():
     """Test Groq API translator prompt formatting and response extraction."""

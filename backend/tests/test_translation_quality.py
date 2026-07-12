@@ -83,6 +83,18 @@ def test_quality_gate_requires_semantic_review_for_long_contrastive_dialogue():
     assert assessment.requires_semantic_review is True
 
 
+def test_quality_gate_detects_single_letter_english_dialogue_but_allows_source_rank_letters():
+    from src.pipeline.quality import TranslationQualityGate
+
+    gate = TranslationQualityGate()
+
+    leakage = gate.evaluate(_segment("I!"), "I!", glossary=())
+    rank = gate.evaluate(_segment("She reached Rank A."), "เธอขึ้นถึงระดับ A แล้ว", glossary=())
+
+    assert "ENGLISH_LEAKAGE" in leakage.issue_codes
+    assert "ENGLISH_LEAKAGE" not in rank.issue_codes
+
+
 def test_quality_gate_accepts_a_short_complete_translation_without_semantic_review():
     from src.pipeline.quality import TranslationQualityGate
 

@@ -47,7 +47,7 @@ class R2StorageService:
                     Key=key,
                     Body=image_bytes,
                     ContentType=content_type,
-                    CacheControl="no-cache, must-revalidate"
+                    CacheControl="public, max-age=86400, immutable"
                 )
                 print(f"[R2 Storage Success] Uploaded image to folder: {manga_slug}/{chapter_number}/ -> {key}")
                 return f"{self.public_url}/{key}?t={int(time.time())}"

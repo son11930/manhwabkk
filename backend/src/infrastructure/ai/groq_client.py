@@ -6,7 +6,7 @@ from src.config import settings
 
 import asyncio
 
-# Global semaphore to limit concurrent Groq API calls across the entire app (prevents 429 rate limit freezes)
+# Global semaphore to limit concurrent Groq API calls across the entire app (prevents 429 rate limit freezes on free tier)
 _groq_semaphore = asyncio.Semaphore(3)
 
 # Model Circuit Breaker / Cooldown registry mapping model name -> expiration timestamp (in seconds)

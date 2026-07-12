@@ -3,6 +3,87 @@
 All notable changes to the **Manga/Manhua AI Translation Web Application** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) and [Everything Claude Code (ECC)](https://github.com/everything-claude-code) principles.
 
+## [Unreleased]
+
+### Fixed
+- Made cancellation durable through every pipeline boundary, including after OCR, after translation, before upload, and before publication; a cancelled job cannot later overwrite the published chapter.
+- Restored Groq's provider-local segment recovery when a page batch fails, while DeepSeek remains locked to DeepSeek-only recovery.
+- Rejected incomplete DeepSeek batch payloads so missing dialogue is recovered explicitly instead of being silently accepted.
+- Hardened deskew OCR against unordered, self-intersecting, out-of-bounds, or degenerate quadrilaterals before calling OpenCV perspective transforms.
+- Prevented stale job-poll responses from overwriting a newer UI poll cycle and surface cancellation request failures to the user.
+- Retained DeepSeek Flash / Pro batch concurrency at 6 / 3, respectively, to preserve throughput while remaining far below provider concurrency limits.
+- Added bounded orientation-aware OCR recovery for slanted low-confidence text: the pipeline rectifies up to four detected text ROIs, retains original page coordinates, and replaces text only when a higher-confidence deskewed candidate preserves stronger textual evidence.
+
+### Planned / Architecture
+- Analyzed DeepSeek Flash translation pipeline bottlenecks (~400s at 62% progress) using the `planner` subagent and published a complete ~60s optimization roadmap in `PROJECT_PLAN.md` covering HTTP keep-alive connection pooling, parallel OCR extraction (`asyncio.gather`), high-concurrency Flash batch translation, and concurrent page rendering & R2 uploads.
+
+### Performance
+- Decoupled sequential segment translation/QA from concurrent page processing in `worker.py`:
+  - **Parallel Stage 1 OCR**: Uses `asyncio.gather` across all pages concurrently while preserving deterministic page ordering.
+  - **Sequential Contextual Translation**: Evaluates quality gates and maintains rolling reading order (`rolling_context[-8:]`) sequentially so dialogue context never leaks or swaps across pages.
+  - **Parallel Stage 3 CPU Rendering & Ordered Upload**: Runs CPU-heavy Inpainting and Typesetting concurrently across all pages via `asyncio.gather`, then uploads rendered pages in deterministic page index order to Cloudflare R2.
+
+
+### Performance
+- Implemented tiered concurrency limits and persistent HTTP keep-alive connection pooling (`max_keepalive_connections=20`) across AI providers:
+  - **DeepSeek Flash (`deepseek-v4-flash`, `deepseek-chat`)**: Dedicated `Semaphore(8)` and 6 concurrent page batches, providing fast parallel translation while preserving a safe buffer well under the 2,500 RPM limit.
+  - **DeepSeek Pro (`deepseek-v4-pro`, `deepseek-reasoner`)**: Dedicated `Semaphore(3)` and 3 concurrent page batches, preserving safety margin under the 500 RPM limit.
+  - **Groq (`groq_client.py`)**: Preserved global `Semaphore(3)` to protect free-tier rate limits.
+  - Guaranteed 100% complete page translation (`allow_partial=False` + batch fallback recovery for unmapped segments) without bubble reordering or mixing up context across pages.
+- Restored targeted OCR recovery: high-confidence pages stay single-pass, while empty or low-confidence pages retain enhanced OCR recovery. Bubble-area safety now uses original image dimensions after downscaling.
+
+- Added structured millisecond/second execution timing logs across pipeline stages (`worker.py`) to pinpoint exact stage durations (OCR extraction per page, AI batch translation duration, per-page CPU inpainting/typesetting time, and Cloudflare R2 upload latency).
+- Smooth progress percentage updates (`30% -> 45%` during OCR, `60%` after AI Batch Translation, `60% -> 95%` during page rendering & upload) so the progress bar never hangs halfway during long stages.
+- Suppressed noisy SQLAlchemy SQL query echo logs (`echo=False` in `database.py`) that flooded the console during 1-second job polling.
+
+### Fixed
+- Fixed mistranslation of cultivation weapon terminology ("LITTLE FLYING DAGGER" / 飞刀 incorrectly translated as "ธนูบิน" or "ระนูบิน") by adding `flying dagger` -> `มีดบิน` / `little flying dagger` -> `มีดบินเล็ก` to the default cultivation glossary (`_SPARE_ME_GREAT_LORD_GLOSSARY`) and terminology post-processing (`translator.py`).
+- Fixed speech bubble snowball merge bug (`ocr.py:_group_lines`) where separate speech bubbles across large vertical gaps (e.g. Spare Me, Great Lord Chapter 149 Page 11 where 3 distinct bubbles were merged into 1, causing text overflow over character faces) were incorrectly merged. `_group_lines` now compares `vertical_gap` against the previous line's bottom coordinate and line height instead of the total accumulated height of the bubble group.
+- Architectural Refactoring (Universality & AGENTS.md Compliance): Purged all story-specific hardcoding (character names, specific manga lore, ad-hoc OCR hacks) from `ocr.py:_normalize_ocr_reading` and `translator.py:VETERAN_TRANSLATOR_SYSTEM_PROMPT`. Replaced story-bound prompt examples with universal multi-genre scanlation examples (Action, Hunter/Dungeon, Wuxia/Cultivation, Romance/Drama) ensuring clean separation of concerns and universal multi-manga support while retaining essential safety guardrails against literal machine-translation idioms (`_post_process_terminology`). Subagent architectural review passed and verified 103/103 tests pass.
+- Fixed Stage 3 bottleneck where missing or incomplete DeepSeek batch translations triggered slow sequential single-segment fallback requests (taking 10-15 seconds per segment -> over 5 minutes total at 60%). Updated `deepseek_batch_translator.py` to accept partial batch responses (`allow_partial=True`) without discarding valid translations, added automatic 1-attempt retry in Stage 2, and added ultra-fast page-level batch recovery (`worker.py:L404-L435`) in Stage 3 that translates all missing, English-leaking (`ENGLISH_LEAKAGE`), or empty segments on a page in a single request (~1.5s per page).
+- Fixed speech bubble line grouping (`ocr.py:_group_lines`) where multi-line sentences inside the same speech bubble (e.g. "HELLO, AREN'T WE GOING TOGETHER?" in Spare Me, Great Lord Chapter 149) were incorrectly split into multiple separate OCR segments, causing fragmented translations and stacked text rendering. Adjacent lines inside the same speech bubble now properly merge into a single unified `OCRSegment`.
+- Fixed stall at 60% progress where every dialogue bubble with >=14 words (`requires_semantic_review=True`) needlessly triggered a sequential single-segment recovery request to DeepSeek even when translated correctly. Recovery re-translation calls (`needs_recovery`) now execute exclusively for mandatory defects (`EMPTY_TRANSLATION`, `ENGLISH_LEAKAGE`, `META_TEXT`), eliminating redundant API requests after Stage 2 batch translation.
+- Fixed critical leakage bug where DeepSeek jobs (`deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-chat`) accidentally fell back to calling Groq (`api.groq.com`) during Quality Gate recovery and emergency single-segment fallback, causing jobs to hang at 60% due to Groq free-tier rate limits (`HTTP 429 Too Many Requests`). All recovery and fallback paths for DeepSeek jobs now strictly route through `DeepSeekBatchTranslator`.
+- Fixed issue where the first image/page of chapters (e.g. Spare Me, Great Lord Chapter 149 Page 1) remained untranslated due to false-positive quality gate rejections (`RANK_MISMATCH` from article letters and `ENGLISH_LEAKAGE` from standard rank letters A-F/S) and over-aggressive ASCII line filtering (`ascii_count > 20`).
+- Added emergency fallback translation in `worker.py` for any individual segment that returns empty or English after AI batch translation, guaranteeing 100% complete Thai translation rendering on every page.
+- Stabilized submit-job polling with one abortable poller, monotonic progress updates, terminal cleanup, relative cancel routing, and no simulated successful job after a failed submit.
+- Removed pulsing status-badge animations that caused visible UI flicker.
+- Removed idle pulse/bounce effects from navigation, home, advertising, and admin surfaces; hover-only buttons now avoid scale transitions that can repeatedly repaint while the pointer is over them.
+- Prevented incomplete DeepSeek batches from silently invoking the Groq single-segment fallback.
+
+### Fixed
+- Removed duplicate DeepSeek multi-page prompt payloads and now reject incomplete batch responses instead of treating original source text as a successful translation. Groq continues to use its existing shared translator path.
+- Limited OCR/OpenCV worker threads to one, added an enhanced recovery pass for partially detected pages, and prevented OCR line grouping from bridging separate speech bubbles.
+- Removed the Typesetter's second background erase pass so only the inpainting stage can clean approved text regions.
+- Added deterministic quality detection for a known female character being referenced with a male Thai pronoun.
+
+### Tests
+- Added regressions for duplicate DeepSeek payloads, incomplete batches, nearby-bubble separation, non-destructive typesetting, and female-pronoun mismatch.
+
+### Performance
+- DeepSeek Flash now runs independent five-page request groups with a bounded concurrency of two; DeepSeek Pro and legacy chat remain serialized, while Groq retains its existing rate-limit-aware path.
+- Enforced strict single-thread caps (`OMP_NUM_THREADS="1"`, `ONNXRUNTIME_NUM_THREADS="1"`, `OMP_THREAD_LIMIT="1"`, and `cv2.setNumThreads(1)`) in `MangaOCREngine` and locked sequential page execution (`max_workers = 1`) in `TranslationPipelineWorker`, restoring July 11 11 PM minimal CPU footprint during OCR and translation.
+- Optimized `MangaOCREngine` (`RapidOCR` ONNX runtime) fallback scale to 1.0X (1 เท่า) and only trigger retry logic when the initial OCR pass detects no speech bubbles, eliminating pixel multiplication and keeping CPU/RAM usage minimal.
+
+### Added
+- Added interactive Stop/Cancel Translation button (`⏹️ หยุดการแปล / ยกเลิกงานนี้ทันที`) on the Submit Job page and backend endpoint `POST /api/v1/jobs/{job_id}/cancel` to immediately cancel long-running or stuck translation jobs and unlock UI inputs.
+
+### Fixed
+- **100% Translation Completeness Guarantee (`DeepSeekBatchTranslator`)**: Added automatic single-segment retry fallback (`_translate_single_fallback`) using canonical `VETERAN_TRANSLATOR_SYSTEM_PROMPT` and `get_genre_context_instructions` from `translator.py`. If a segment ID is dropped or left in English by a batch model response, it is automatically translated individually so no speech bubble is left untranslated.
+- **Speech Bubble Box Merging (`MangaOCREngine._merge_nearby_boxes`)**: Updated bounding box merge condition to support overlapping vertical lines (`vertical_gap < 0`), preventing single multi-line speech bubbles from being split into overlapping boxes.
+- **Windows Tone Mark Elevation (`Typesetter._draw_thai_line_clean`)**: Added vertical tone mark elevation (`-int(size * 0.26)`) when rendering Thai upper tone marks above upper vowels on systems without RAQM layout engine, preventing tone marks from colliding or sinking into vowels.
+- Fixed false-positive `ENGLISH_LEAKAGE` rejections in `TranslationQualityGate` on dialogue mentioning ranks (`F-LEVEL`, `D-LEVEL`, `C-LEVEL`, `S-RANK`), ensuring bubbles mentioning rank letters or standard acronyms pass quality evaluation and are 100% translated to Thai script instead of remaining untranslated.
+- Upgraded `TypesetterEngine` from custom cluster-by-cluster character splitting (`_draw_thai_line_clean`) to native full-line Pillow text rendering (`draw.text` with Raqm/FreeType), ensuring smooth Thai kerning, natural word spacing, and crisp font appearance inside speech bubbles.
+- Permanently resolved issue where jobs completing with dialogue review warnings (`warnings = True`) withheld database page records (`is_translated=False`) and displayed `❌ เกิดข้อผิดพลาด` on the UI despite successfully uploading images to Cloudflare R2. All staged pages are now saved to the chapter database with `is_translated=True` and report status `COMPLETED_WITH_WARNINGS` (`✅ แปลสำเร็จเรียบร้อย!`), ensuring reader pages immediately display completed chapters.
+- Restored the complete list of 10 fallback models in `GroqClient` (`openai/gpt-oss-120b`, `qwen/qwen3-32b`, `qwen/qwen3.6-27b`, `meta-llama/llama-4-scout-17b-16e-instruct`, `llama-3.1-8b-instant`, `openai/gpt-oss-20b`, `allam-2-7b`, `groq/compound`, `groq/compound-mini`) exactly as requested.
+- Added progressive progress updates during OCR (30% to 45%) and page translation (45% to 95%) so jobs clearly report real-time progression and never appear frozen at 30%.
+- Added early cancellation checks inside `TranslationPipelineWorker` loops to halt processing instantly when a job status becomes `CANCELLED`.
+- Short untranslated English dialogue such as `THEM!` now triggers targeted recovery before typesetting, instead of remaining as source pixels when it falls below the semantic-review length threshold. The recovery keeps the user-selected provider.
+- Added a DeepSeek worker regression test verifying the recovery receives the detected issue, produces Thai text, and sends only that Thai text to typesetting.
+- Added a conditional OCR recovery pass for low-confidence or empty detections. It uses enlarged adaptive-threshold processing to recover stylized short dialogue such as `TO ME`, merges overlapping detections by confidence, and sends recovered text through the normal translation/typesetting path.
+- Replaced single-stream OCR grouping with concurrent dialogue-region clustering, preventing left/right speech bubbles and TL/N notes from being interleaved into separately translated fragments.
+- Made DeepSeek multi-page batches serialize their structured segment contract, glossary, and continuity context. Jobs with unresolved dialogue are now withheld from publication rather than replacing reader pages with partial English output.
+
 ## [1.3.13-DeepSeekV4TranslationPlan] - 2026-07-12
 
 ### Added

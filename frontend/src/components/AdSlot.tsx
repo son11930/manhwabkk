@@ -53,7 +53,7 @@ export const AdSlot: React.FC<AdSlotProps> = ({ position = 'in-between', classNa
         
         <div className="flex items-center space-x-3 sm:space-x-4 z-10">
           <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-br from-amber-500/20 to-orange-500/20 border border-amber-500/30 flex items-center justify-center shrink-0">
-            <DollarSign className="w-5 h-5 sm:w-6 sm:h-6 text-amber-400 animate-pulse" />
+            <DollarSign className="w-5 h-5 sm:w-6 sm:h-6 text-amber-400" />
           </div>
           <div>
             <div className="flex items-center space-x-2">

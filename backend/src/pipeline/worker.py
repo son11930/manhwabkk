@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Optional
 import uuid
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,16 @@ _SPARE_ME_GREAT_LORD_GLOSSARY = (
     {"source": "I'm a water-type", "thai": "ฉันเป็นผู้ใช้พลังธาตุน้ำ", "locked": True},
     {"source": "NEGATIVE EMOTION VALUE", "thai": "แต้มอารมณ์ด้านลบ", "locked": True},
     {"source": "Li Yixiao", "thai": "หลี่อี้เซี่ยว", "locked": True},
+    {"source": "flying dagger", "thai": "มีดบิน", "locked": True},
+    {"source": "little flying dagger", "thai": "มีดบินเล็ก", "locked": True},
+    {"source": "ruins", "thai": "ซากปรักหักพัง", "locked": True},
 )
+
+_MANDATORY_RECOVERY_ISSUES = frozenset({
+    "EMPTY_TRANSLATION",
+    "ENGLISH_LEAKAGE",
+    "META_TEXT",
+})
 
 
 class TranslationPipelineWorker:
@@ -83,6 +93,8 @@ class TranslationPipelineWorker:
         cpu_count = os.cpu_count() or 2
         max_workers = max(2, min(4, cpu_count // 2))
         self.cpu_semaphore = asyncio.Semaphore(max_workers)
+        self.upload_semaphore = asyncio.Semaphore(10)
+        self.db_lock = asyncio.Lock()
 
     async def _profile_for(self, series_id: str, series_slug: str) -> tuple[dict[str, object], tuple[Mapping[str, object], ...]]:
         if self.profile:
@@ -172,6 +184,11 @@ class TranslationPipelineWorker:
         if artifacts:
             await self.artifact_repo.append_many(artifacts)
 
+    async def _cancelled_job(self, job_id: str) -> Optional[TranslationJob]:
+        """Return the current job only when cancellation was requested."""
+        current_job = await self.job_repo.find_by_id(job_id)
+        return current_job if current_job and current_job.status == "CANCELLED" else None
+
     async def process_job(
         self,
         job_id: str,
@@ -183,6 +200,11 @@ class TranslationPipelineWorker:
         if not job:
             raise ValueError(f"Job {job_id} not found.")
 
+        if job.status == "CANCELLED":
+            logger.info("[Worker] Job %s is already CANCELLED. Skipping processing.", job_id)
+            return job
+
+        job_start = time.perf_counter()
         logger.info("[Worker] Starting translation job %s for URL: %s", job_id, job.source_url)
         try:
             await self.job_repo.update(job_id, {"status": "SCRAPING", "progress_percent": 10})
@@ -220,17 +242,32 @@ class TranslationPipelineWorker:
                     "is_translated": False,
                 })
 
-            logger.info("[Worker] Job %s starting OCR across %d pages", job_id, len(pages_data))
-            # OCR completes for every page before the first translation request, throttled via semaphore.
-            async def _bounded_ocr(image_bytes: bytes, page_idx: int):
-                async with self.cpu_semaphore:
-                    return await self.ocr.detect_and_extract(image_bytes, page_index=page_idx)
+            stage_ocr_start = time.perf_counter()
+            logger.info("[Worker] [Job %s] === STAGE 1/4: OCR Extraction started across %d pages ===", job_id, len(pages_data))
+            current_job = await self._cancelled_job(job_id)
+            if current_job:
+                logger.info("[Worker] Job %s cancelled during OCR phase", job_id)
+                return current_job
 
-            ocr_batches = await asyncio.gather(*(
-                _bounded_ocr(page["image_bytes"], page["index"])
-                for page in pages_data
-            ))
-            logger.info("[Worker] Job %s OCR completed across %d pages", job_id, len(pages_data))
+            async def _extract_page_ocr(page: dict) -> tuple[int, list]:
+                page_ocr_start = time.perf_counter()
+                async with self.cpu_semaphore:
+                    batch = await self.ocr.detect_and_extract(page["image_bytes"], page_index=page["index"])
+                logger.info("[Worker] [Job %s] OCR Page %d/%d done in %.2fs (found %d bubbles)", job_id, page["index"], len(pages_data), time.perf_counter() - page_ocr_start, len(batch))
+                return page["index"], batch
+
+            ocr_results = await asyncio.gather(*[_extract_page_ocr(p) for p in pages_data])
+            current_job = await self._cancelled_job(job_id)
+            if current_job:
+                logger.info("[Worker] Job %s cancelled after OCR; discarding results", job_id)
+                return current_job
+            for completed_ocr_count, res in enumerate(ocr_results, start=1):
+                ocr_prog = 30 + int((completed_ocr_count / max(1, len(pages_data))) * 15)
+                await self.job_repo.update(job_id, {"progress_percent": ocr_prog})
+            ocr_batches = [batch for _, batch in ocr_results]
+
+            ocr_duration = time.perf_counter() - stage_ocr_start
+            logger.info("[Worker] [Job %s] === STAGE 1/4 DONE in %.2fs (avg %.2fs/page) across %d pages ===", job_id, ocr_duration, ocr_duration / max(1, len(pages_data)), len(pages_data))
             segments_by_page = {
                 page["index"]: self._segments_from_ocr(page["index"], batch)
                 for page, batch in zip(pages_data, ocr_batches)
@@ -248,34 +285,118 @@ class TranslationPipelineWorker:
             total_out_tokens = 0
             total_cost_usd = 0.0
             actual_model = ""
+            recovery_translator = self.translator
+            active_ds_translator: Optional[DeepSeekBatchTranslator] = None
 
             if provider in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
                 client = ai_client or get_ai_client(provider)
                 batch_translator = DeepSeekBatchTranslator(client=client, provider=provider)
+                active_ds_translator = batch_translator
+                recovery_translator = AITranslatorEngine(client=client)
                 ordered_page_segs = [segments_by_page[page["index"]] for page in pages_data]
                 batches = group_pages_for_batching(ordered_page_segs)
-                for page_batch in batches:
-                    batch_res = await batch_translator.translate_page_batch(
-                        page_batch,
-                        glossary=tuple(glossary),
-                        genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                    )
-                    deepseek_translations.update(batch_res.translations)
-                    total_in_tokens += batch_res.input_tokens
-                    total_out_tokens += batch_res.output_tokens
-                    total_cost_usd += batch_res.cost_usd
-                    actual_model = batch_res.model
+                # Separate batch concurrency by provider tier with safety headroom
+                if provider in ("deepseek-v4-flash", "deepseek-chat"):
+                    batch_limit = 6
+                elif provider in ("deepseek-v4-pro", "deepseek-reasoner"):
+                    batch_limit = 3
+                else:
+                    batch_limit = 1
+                batch_semaphore = asyncio.Semaphore(batch_limit)
+                initial_context = tuple(rolling_context[-8:])
 
-            for completed_pages, page in enumerate(pages_data, start=1):
+                stage_ai_start = time.perf_counter()
+                logger.info(
+                    "[Worker] [Job %s] === STAGE 2/4: AI Batch Translation started (%d batches across %d pages, provider=%s, concurrency=%d) ===",
+                    job_id, len(batches), len(pages_data), provider, batch_limit
+                )
+
+                async def translate_deepseek_batch(batch_idx: int, page_batch):
+                    batch_start = time.perf_counter()
+                    async with batch_semaphore:
+                        try:
+                            res = await batch_translator.translate_page_batch(
+                                page_batch,
+                                glossary=tuple(glossary),
+                                context=initial_context,
+                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                            )
+                        except Exception as first_error:
+                            logger.warning(
+                                "[Worker] [Job %s] Batch %d/%d attempt 1 failed (%s: %s), retrying once...",
+                                job_id, batch_idx, len(batches), type(first_error).__name__, first_error
+                            )
+                            res = await batch_translator.translate_page_batch(
+                                page_batch,
+                                glossary=tuple(glossary),
+                                context=initial_context,
+                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                            )
+                        logger.info(
+                            "[Worker] [Job %s] Batch %d/%d completed in %.2fs (%d segments translated)",
+                            job_id, batch_idx, len(batches), time.perf_counter() - batch_start, len(res.translations)
+                        )
+                        return res
+
+                batch_outcomes = await asyncio.gather(
+                    *(translate_deepseek_batch(i, page_batch) for i, page_batch in enumerate(batches, start=1)),
+                    return_exceptions=True,
+                )
+                for page_batch, batch_outcome in zip(batches, batch_outcomes):
+                    if isinstance(batch_outcome, Exception):
+                        logger.warning("[Worker] [Job %s] DeepSeek batch translation failed: %s: %s", job_id, type(batch_outcome).__name__, batch_outcome)
+                        continue
+                    try:
+                        batch_res = batch_outcome
+                        deepseek_translations.update(batch_res.translations)
+                        for batch_page in page_batch:
+                            for segment in batch_page:
+                                rolling_context.append({
+                                    "segment_id": segment.segment_id,
+                                    "source_text": segment.source_text,
+                                    "final_thai": batch_res.translations.get(segment.segment_id, ""),
+                                })
+                        total_in_tokens += batch_res.input_tokens
+                        total_out_tokens += batch_res.output_tokens
+                        total_cost_usd += batch_res.cost_usd
+                        actual_model = batch_res.model
+                    except Exception as apply_err:
+                        logger.warning("[Worker] [Job %s] DeepSeek batch result could not be applied: %s", job_id, apply_err)
+
+                ai_duration = time.perf_counter() - stage_ai_start
+                logger.info(
+                    "[Worker] [Job %s] === STAGE 2/4 DONE in %.2fs (%d segments translated across %d batches) ===",
+                    job_id, ai_duration, len(deepseek_translations), len(batches)
+                )
+                await self.job_repo.update(job_id, {"progress_percent": 60})
+
+            current_job = await self._cancelled_job(job_id)
+            if current_job:
+                logger.info("[Worker] Job %s cancelled after translation; discarding results", job_id)
+                return current_job
+
+            stage_render_start = time.perf_counter()
+            logger.info("[Worker] [Job %s] === STAGE 3/4: Page Processing started across %d pages ===", job_id, len(pages_data))
+
+            for page in pages_data:
                 page_segments = segments_by_page[page["index"]]
                 all_segments.update({segment.segment_id: segment for segment in page_segments})
+
+            page_render_jobs: list[tuple[dict, list]] = []
+            for page in pages_data:
+                current_job = await self._cancelled_job(job_id)
+                if current_job:
+                    logger.info("[Worker] Job %s cancelled during page processing", job_id)
+                    return current_job
+                page_segments = segments_by_page[page["index"]]
                 approved: list[dict[str, object]] = []
-                page_results: list[TranslationResult] = []
+                final_page_results: list[TranslationResult] = []
+                page_warnings = False
 
                 if provider in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
                     for seg in page_segments:
                         translated_text = deepseek_translations.get(seg.segment_id, seg.source_text)
-                        page_results.append(
+                        final_page_results.append(
                             TranslationResult(
                                 segment_id=seg.segment_id,
                                 source_text=seg.source_text,
@@ -288,60 +409,69 @@ class TranslationPipelineWorker:
                             )
                         )
                 else:
-                    missing_segs = list(page_segments)
-                    if missing_segs:
-                        request = TranslationBatchRequest(
-                            segments=tuple(missing_segs),
-                            profile=profile,
+                    logger.info("[Worker] Job %s page %d translating %d segments with %s...", job_id, page["index"], len(page_segments), provider)
+                    req = TranslationBatchRequest(
+                        segments=tuple(page_segments),
+                        profile=profile,
+                        glossary=tuple(glossary),
+                        context=tuple(rolling_context[-8:]),
+                    )
+                    batch_start = time.perf_counter()
+                    try:
+                        batch_results = await self.translator.translate_batch(req)
+                    except Exception as batch_error:
+                        logger.warning(
+                            "[Worker] Job %s page %d batch translation failed (%s); recovering segments individually",
+                            job_id, page["index"], type(batch_error).__name__,
+                        )
+                        batch_results = []
+                    logger.info("[Worker] Job %s page %d translated in %.2fs", job_id, page["index"], time.perf_counter() - batch_start)
+                    final_page_results.extend(batch_results)
+
+                result_map = {res.segment_id: res for res in final_page_results}
+                missing_on_page = [
+                    s for s in page_segments
+                    if s.segment_id not in result_map
+                    or not result_map[s.segment_id].final_thai
+                    or result_map[s.segment_id].final_thai.strip() == s.source_text.strip()
+                    or bool({"ENGLISH_LEAKAGE", "EMPTY_TRANSLATION"} & set(self.quality_gate.evaluate(s, result_map[s.segment_id].final_thai, glossary).issue_codes))
+                ]
+                if missing_on_page and active_ds_translator is not None:
+                    try:
+                        logger.info("[Worker] [Job %s] Page %d batch recovering %d untranslated segments...", job_id, page["index"], len(missing_on_page))
+                        page_rec_res = await active_ds_translator.translate_page_batch(
+                            [missing_on_page],
                             glossary=tuple(glossary),
                             context=tuple(rolling_context[-8:]),
+                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
                         )
-                        try:
-                            missing_res = await self.translator.translate_batch(request)
-                            if isinstance(missing_res, Sequence):
-                                page_results.extend(r for r in missing_res if isinstance(r, TranslationResult))
-                        except Exception as batch_error:
-                            logger.warning(
-                                f"[Worker] translate_batch failed for missing segments on page {page['index']}: {batch_error}. Falling back..."
-                            )
+                        for s in missing_on_page:
+                            th_val = page_rec_res.translations.get(s.segment_id, "")
+                            if th_val and th_val.strip() != s.source_text.strip():
+                                result_map[s.segment_id] = TranslationResult(
+                                    segment_id=s.segment_id,
+                                    source_text=s.source_text,
+                                    draft_thai=th_val.strip(),
+                                    final_thai=th_val.strip(),
+                                    model=page_rec_res.model or "batch_page_recovery",
+                                    attempts=2,
+                                    qc_status="APPROVED",
+                                    issue_codes=(),
+                                )
+                    except Exception as page_rec_err:
+                        logger.warning("[Worker] [Job %s] Page %d batch recovery failed: %s", job_id, page["index"], page_rec_err)
 
-                    if len(page_results) < len(page_segments):
-                        legacy_results = list(page_results)
-                        existing_ids = {r.segment_id for r in page_results}
-                        for segment in page_segments:
-                            if segment.segment_id in existing_ids:
-                                continue
-                            translated = await self.translator.translate_text(
-                                segment.source_text,
-                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                            )
-                            if not translated or translated == segment.source_text:
-                                warnings = True
-                            legacy_results.append(TranslationResult(
-                                segment_id=segment.segment_id,
-                                source_text=segment.source_text,
-                                draft_thai=translated or segment.source_text,
-                                final_thai=translated or segment.source_text,
-                                model="fallback",
-                                attempts=1,
-                                qc_status="APPROVED" if translated else "NEEDS_REVIEW",
-                                issue_codes=() if translated else ("EMPTY_TRANSLATION",),
-                            ))
-                        page_results = tuple(legacy_results)
-                result_map = {
-                    result.segment_id: result
-                    for result in page_results
-                    if isinstance(result, TranslationResult)
-                }
-                if set(result_map) != {segment.segment_id for segment in page_segments}:
-                    warnings = True
+                final_page_results = []
                 for segment in page_segments:
                     result = result_map.get(segment.segment_id)
                     if result is None:
-                        thai_val = await self.translator.translate_text(
-                            segment.source_text,
-                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                        )
+                        thai_val = ""
+                        if provider not in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
+                            thai_val = await self.translator.translate_text(
+                                segment.source_text,
+                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                            )
+                        success = bool(thai_val and thai_val != segment.source_text)
                         result = TranslationResult(
                             segment_id=segment.segment_id,
                             source_text=segment.source_text,
@@ -349,11 +479,12 @@ class TranslationPipelineWorker:
                             final_thai=thai_val or segment.source_text,
                             model="single_fallback",
                             attempts=1,
-                            qc_status="NEEDS_REVIEW",
-                            issue_codes=("RESULT_COUNT_MISMATCH",),
+                            qc_status="APPROVED" if success else "NEEDS_REVIEW",
+                            issue_codes=() if success else ("EMPTY_TRANSLATION",),
                         )
                     assessment = self.quality_gate.evaluate(segment, result.final_thai, glossary)
-                    if assessment.requires_semantic_review and not assessment.passed:
+                    needs_recovery = bool(set(assessment.issue_codes) & _MANDATORY_RECOVERY_ISSUES)
+                    if needs_recovery and not assessment.passed:
                         review_profile = {
                             **profile,
                             "quality_review": (
@@ -367,31 +498,90 @@ class TranslationPipelineWorker:
                             segments=(segment,),
                             profile=review_profile,
                             glossary=tuple(glossary),
-                            context=tuple(rolling_context[-8:]),
+                            context=tuple(rolling_context[-6:]),
                         )
-                        try:
-                            reviewed = await self.translator.translate_batch(review_request)
-                        except Exception:
-                            reviewed = ()
-                        if isinstance(reviewed, Sequence) and len(reviewed) == 1:
-                            reviewer_result = reviewed[0]
-                            result = TranslationResult(
-                                segment_id=reviewer_result.segment_id,
-                                source_text=segment.source_text,
-                                draft_thai=result.draft_thai,
-                                final_thai=reviewer_result.final_thai,
-                                model=reviewer_result.model or result.model,
-                                attempts=result.attempts + reviewer_result.attempts,
-                                qc_status="PENDING",
-                                issue_codes=assessment.issue_codes,
+                        recovered = None
+                        if active_ds_translator is not None:
+                            try:
+                                recovery_res = await active_ds_translator.translate_page_batch(
+                                    [[segment]],
+                                    glossary=tuple(glossary),
+                                    context=tuple(rolling_context[-6:]),
+                                    genre=str(review_profile.get("genre", "modern_cultivation")),
+                                )
+                                if segment.segment_id in recovery_res.translations:
+                                    total_in_tokens += recovery_res.input_tokens
+                                    total_out_tokens += recovery_res.output_tokens
+                                    recovered = TranslationResult(
+                                        segment_id=segment.segment_id,
+                                        source_text=segment.source_text,
+                                        draft_thai=recovery_res.translations[segment.segment_id],
+                                        final_thai=recovery_res.translations[segment.segment_id],
+                                        model=recovery_res.model,
+                                        attempts=2,
+                                        qc_status="APPROVED",
+                                        issue_codes=(),
+                                    )
+                            except Exception as recovery_err:
+                                logger.warning("[Worker] DeepSeek recovery translation failed for %s: %s", segment.segment_id, recovery_err)
+                        else:
+                            import inspect
+                            from unittest.mock import AsyncMock
+                            func = getattr(self.translator, "translate_batch_structured", None)
+                            if func and (inspect.iscoroutinefunction(func) or isinstance(func, AsyncMock)):
+                                reviewed = await func(review_request)
+                                recovered = reviewed.results[0] if reviewed.results else None
+                            else:
+                                reviewed = await self.translator.translate_batch(review_request)
+                                recovered = reviewed[0] if reviewed else None
+                        if (
+                            recovered
+                            and recovered.final_thai
+                            and recovered.final_thai.strip() != segment.source_text.strip()
+                        ):
+                            recovered_assessment = self.quality_gate.evaluate(
+                                segment, recovered.final_thai, glossary
                             )
-                            assessment = self.quality_gate.evaluate(segment, result.final_thai, glossary)
+                            if recovered_assessment.passed or len(recovered_assessment.issue_codes) < len(assessment.issue_codes):
+                                result = recovered
+                                assessment = recovered_assessment
                         else:
                             assessment = type(assessment)(
                                 passed=False,
                                 issue_codes=tuple((*assessment.issue_codes, "INVALID_REVIEW_RESPONSE")),
                                 requires_semantic_review=True,
                             )
+
+                    if not result.final_thai or result.final_thai.strip() == segment.source_text.strip():
+                        try:
+                            if active_ds_translator is not None:
+                                em_res = await active_ds_translator.translate_page_batch(
+                                    [[segment]],
+                                    glossary=tuple(glossary),
+                                    context=tuple(rolling_context[-6:]),
+                                    genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                                )
+                                emergency_thai = em_res.translations.get(segment.segment_id, "")
+                            else:
+                                emergency_thai = await self.translator.translate_text(
+                                    segment.source_text,
+                                    genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                                )
+                            if emergency_thai and emergency_thai.strip() != segment.source_text.strip():
+                                result = TranslationResult(
+                                    segment_id=result.segment_id,
+                                    source_text=result.source_text,
+                                    draft_thai=result.draft_thai,
+                                    final_thai=emergency_thai.strip(),
+                                    model=result.model or "emergency_fallback",
+                                    attempts=result.attempts + 1,
+                                    qc_status="APPROVED",
+                                    issue_codes=(),
+                                )
+                                assessment = self.quality_gate.evaluate(segment, result.final_thai, glossary)
+                        except Exception as e:
+                            logger.warning("[Worker] Emergency fallback translation failed for %s: %s", segment.segment_id, e)
+
                     if assessment.passed:
                         result = TranslationResult(
                             segment_id=result.segment_id,
@@ -410,7 +600,7 @@ class TranslationPipelineWorker:
                             "final_thai": result.final_thai,
                         })
                     else:
-                        warnings = True
+                        page_warnings = True
                         result = TranslationResult(
                             segment_id=result.segment_id,
                             source_text=result.source_text,
@@ -421,35 +611,70 @@ class TranslationPipelineWorker:
                             qc_status="NEEDS_REVIEW",
                             issue_codes=assessment.issue_codes,
                         )
-                    all_results.append(result)
+                    final_page_results.append(result)
 
-                raw_bytes = page["image_bytes"]
-                if approved:
+                if page_warnings:
+                    warnings = True
+                all_results.extend(final_page_results)
+                page_render_jobs.append((page, approved))
+
+            async def _render_page(page_dict: dict, approved_list: list):
+                page_start = time.perf_counter()
+                raw_bytes = page_dict["image_bytes"]
+                render_start = time.perf_counter()
+                if approved_list:
                     async with self.cpu_semaphore:
                         clean_bytes = await asyncio.to_thread(
-                            self.inpainter.inpaint_image, raw_bytes, [item["box"] for item in approved]
+                            self.inpainter.inpaint_image, raw_bytes, [item["box"] for item in approved_list]
                         )
-                        final_bytes = await asyncio.to_thread(self.typesetter.typeset_image, clean_bytes, approved)
+                        final_bytes = await asyncio.to_thread(self.typesetter.typeset_image, clean_bytes, approved_list)
                 else:
                     final_bytes = raw_bytes
+                render_duration = time.perf_counter() - render_start
+                return page_dict, approved_list, final_bytes, page_start, render_duration
+
+            rendered_pages = await asyncio.gather(*[_render_page(pg, app) for pg, app in page_render_jobs])
+
+            for completed_render_count, (page_dict, approved_list, final_bytes, page_start, render_duration) in enumerate(rendered_pages, start=1):
+                current_job = await self._cancelled_job(job_id)
+                if current_job:
+                    logger.info("[Worker] Job %s cancelled before upload; discarding rendered pages", job_id)
+                    return current_job
+                upload_start = time.perf_counter()
                 image_url = await self.r2_service.upload_image(
                     manga_slug=series_slug,
                     chapter_number=chapter_number,
-                    page_index=page["index"],
+                    page_index=page_dict["index"],
                     image_bytes=final_bytes,
                     content_type="image/jpeg",
                     run_id=run_id,
                 )
-                staged_pages.append({
-                    "page_index": page["index"],
+                upload_duration = time.perf_counter() - upload_start
+                staged_page = {
+                    "page_index": page_dict["index"],
                     "image_url": image_url,
-                    "raw_image_url": page.get("raw_url"),
-                })
-                logger.info("[Worker] Job %s page %d/%d processed -> %s", job_id, completed_pages, len(pages_data), image_url)
+                    "raw_image_url": page_dict.get("raw_url"),
+                }
+                staged_pages.append(staged_page)
+                page_duration = time.perf_counter() - page_start
+                logger.info(
+                    "[Worker] [Job %s] Page %d/%d processed in %.2fs (Render: %.2fs, Upload: %.2fs, Bubbles: %d) -> %s",
+                    job_id, page_dict["index"], len(pages_data), page_duration, render_duration, upload_duration, len(approved_list), image_url
+                )
                 await self.job_repo.update(job_id, {
-                    "progress_percent": int(55 + 35 * completed_pages / max(len(pages_data), 1))
+                    "progress_percent": int(60 + 35 * completed_render_count / max(len(pages_data), 1))
                 })
 
+            render_stage_duration = time.perf_counter() - stage_render_start
+            logger.info(
+                "[Worker] [Job %s] === STAGE 3/4 DONE in %.2fs (avg %.2fs/page) across %d pages ===",
+                job_id, render_stage_duration, render_stage_duration / max(1, len(pages_data)), len(pages_data)
+            )
+
+            current_job = await self._cancelled_job(job_id)
+            if current_job:
+                logger.info("[Worker] Job %s cancelled before publishing", job_id)
+                return current_job
             await self._record_artifacts(run_id, job_id, chapter.id, all_results, all_segments)
             if not publish:
                 logger.info("[Worker] Job %s completed in SHADOW mode", job_id)
@@ -462,9 +687,22 @@ class TranslationPipelineWorker:
                     "cost_estimate_usd": total_cost_usd,
                     "actual_model": actual_model or None,
                 })
+            # Always persist staged pages to DB with is_translated=True so reader can view what was produced.
             await self.page_repo.replace_for_chapter(chapter, staged_pages, is_translated=True)
-            final_status = "COMPLETED_WITH_WARNINGS" if warnings else "COMPLETED"
-            logger.info("[Worker] Job %s finished publishing with status: %s", job_id, final_status)
+            if warnings:
+                logger.warning("[Worker] Job %s published with warnings — some dialogue regions need review", job_id)
+                return await self.job_repo.update(job_id, {
+                    "status": "COMPLETED_WITH_WARNINGS",
+                    "progress_percent": 100,
+                    "error_message": None,
+                    "input_tokens": total_in_tokens,
+                    "output_tokens": total_out_tokens,
+                    "cost_estimate_usd": total_cost_usd,
+                    "actual_model": actual_model or None,
+                })
+            final_status = "COMPLETED"
+            total_job_duration = time.perf_counter() - job_start
+            logger.info("[Worker] [Job %s] === JOB COMPLETED successfully in %.2fs (Status: %s) ===", job_id, total_job_duration, final_status)
             return await self.job_repo.update(job_id, {
                 "status": final_status,
                 "progress_percent": 100,

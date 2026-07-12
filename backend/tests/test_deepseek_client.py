@@ -10,10 +10,10 @@ def test_deepseek_model_mapping():
     assert c1.model == "deepseek-v4-flash"
 
     c2 = DeepSeekClient(provider="deepseek-v4-pro", api_key="test-key")
-    assert c2.model == "deepseek-reasoner"
+    assert c2.model == "deepseek-v4-pro"
 
     c3 = DeepSeekClient(provider="deepseek-chat", api_key="test-key")
-    assert c3.model == "deepseek-chat"
+    assert c3.model == "deepseek-v4-flash"
 
 
 def test_deepseek_missing_api_key_raises_safe_error():
@@ -80,3 +80,24 @@ async def test_deepseek_retry_on_server_error_no_fallback_to_groq():
             )
             assert result.attempts == 2
             assert result.model == "deepseek-v4-flash"
+            assert {call.kwargs["json"]["model"] for call in mock_post.call_args_list} == {"deepseek-v4-flash"}
+
+
+def test_deepseek_separate_semaphores_and_pooling():
+    from src.infrastructure.ai.deepseek_client import (
+        _deepseek_flash_semaphore,
+        _deepseek_pro_semaphore,
+        _get_shared_http_client,
+    )
+    assert _deepseek_flash_semaphore._value == 8
+    assert _deepseek_pro_semaphore._value == 3
+
+    flash_client = DeepSeekClient(provider="deepseek-v4-flash", api_key="test-key")
+    assert flash_client._get_semaphore() is _deepseek_flash_semaphore
+
+    pro_client = DeepSeekClient(provider="deepseek-v4-pro", api_key="test-key")
+    assert pro_client._get_semaphore() is _deepseek_pro_semaphore
+
+    http_c1 = _get_shared_http_client(30.0)
+    http_c2 = _get_shared_http_client(30.0)
+    assert http_c1 is http_c2

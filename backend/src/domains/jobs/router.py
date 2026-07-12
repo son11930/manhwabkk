@@ -35,3 +35,9 @@ async def get_job_status(job_id: str, session: AsyncSession = Depends(get_db_ses
     service = JobService(session)
     job = await service.get_job_status(job_id)
     return success_response(JobStatusRes.model_validate(job))
+
+@router.post("/{job_id}/cancel", response_model=APIResponse[JobStatusRes])
+async def cancel_job(job_id: str, session: AsyncSession = Depends(get_db_session)):
+    service = JobService(session)
+    job = await service.cancel_job(job_id)
+    return success_response(JobStatusRes.model_validate(job))

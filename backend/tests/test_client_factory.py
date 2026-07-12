@@ -10,12 +10,12 @@ def test_get_ai_client_factory():
 
     c_flash = get_ai_client("deepseek-v4-flash", api_key="test-key")
     assert isinstance(c_flash, DeepSeekClient)
-    assert c_flash.model == "deepseek-chat"
+    assert c_flash.model == "deepseek-v4-flash"
 
     c_pro = get_ai_client("deepseek-v4-pro", api_key="test-key")
     assert isinstance(c_pro, DeepSeekClient)
-    assert c_pro.model == "deepseek-reasoner"
+    assert c_pro.model == "deepseek-v4-pro"
 
     c_chat = get_ai_client("deepseek-chat", api_key="test-key")
     assert isinstance(c_chat, DeepSeekClient)
-    assert c_chat.model == "deepseek-chat"
+    assert c_chat.model == "deepseek-v4-flash"

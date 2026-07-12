@@ -103,12 +103,12 @@ class TypesetterEngine:
         """
         img_copy = image.copy()
         draw = ImageDraw.Draw(img_copy)
-        
+
         left, top, right, bottom = box
         box_width = max(right - left, 20)
         box_height = max(bottom - top, 20)
         max_line_width = max(box_width - 12, int(box_width * 0.9))
-        
+
         import re
         cjk_map = {
             "迦楼罗": "การูดา",
@@ -126,7 +126,9 @@ class TypesetterEngine:
         if not words:
             return img_copy
 
-        # Erase original text inside the speech bubble box before rendering Thai text
+        # Cleaning belongs to InpainterEngine. Drawing a second rectangle here
+        # can erase artwork when OCR supplied an overly broad box.
+        """
         bg_color = (255, 255, 255)
         try:
             sample_points = [
@@ -159,6 +161,7 @@ class TypesetterEngine:
         if erase_box[2] > erase_box[0] and erase_box[3] > erase_box[1]:
             draw.rectangle(erase_box, fill=bg_color)
 
+        """
         # Calculate dynamic start font size based on bubble dimensions so large bubbles get large text
         start_size = max(18, min(int(box_height * 0.28), int(box_width * 0.16), 34))
         best_font = self.font
@@ -199,50 +202,51 @@ class TypesetterEngine:
                 line_width = len(shaped_line) * (best_size // 2)
                 
             x = left + max((box_width - line_width) // 2, 2)
-            self._draw_thai_line_clean(draw, (x, current_y), shaped_line, font=best_font, fill=text_color)
+            self._draw_thai_line_clean(draw, (x, current_y), shaped_line, best_font, text_color)
             current_y += line_height
             
         return img_copy
 
     def _draw_thai_line_clean(self, draw: ImageDraw.ImageDraw, pos: tuple, text: str, font, fill: tuple) -> None:
         """
-        Renders Thai characters cluster-by-cluster, lifting tone marks sitting above upper vowels
-        by ~32% of font size so tone marks never sink into upper vowels on systems without HarfBuzz.
+        Renders a full line of Thai text cleanly, elevating tone marks above upper vowels on systems without RAQM layout.
         """
+        upper_vowels = set("ัิีึื")
+        tone_marks = set("่้๊๋์")
+        
+        # If RAQM is available or no tone marks follow upper vowels, draw directly
+        has_vowel_tone_collision = any(
+            i > 0 and text[i] in tone_marks and text[i-1] in upper_vowels
+            for i in range(len(text))
+        )
+        if not has_vowel_tone_collision:
+            draw.text(pos, text, font=font, fill=fill)
+            return
+
         x, y = pos
-        shift_y = max(int(getattr(font, "size", 20) * 0.32), 6)
-        upper_vowels = {'\u0e31', '\u0e34', '\u0e35', '\u0e36', '\u0e37', '\u0e4d'}
-        tone_marks = {'\u0e48', '\u0e49', '\u0e4a', '\u0e4b', '\u0e4c'}
+        size = getattr(font, "size", 20)
+        tone_dy = -int(size * 0.26)
+        
         i = 0
         while i < len(text):
-            char = text[i]
-            cluster = char
-            i += 1
-            while i < len(text) and text[i] in upper_vowels.union(tone_marks).union({'\u0e38', '\u0e39'}):
-                cluster += text[i]
+            ch = text[i]
+            if i > 0 and ch in tone_marks and text[i-1] in upper_vowels:
+                draw.text((x, y + tone_dy), ch, font=font, fill=fill)
                 i += 1
+                continue
             
-            has_upper = any(c in upper_vowels for c in cluster)
-            has_tone = any(c in tone_marks for c in cluster)
-            
-            if has_upper and has_tone:
-                base_part = ''.join(c for c in cluster if c not in tone_marks)
-                tone_part = ''.join(c for c in cluster if c in tone_marks)
-                draw.text((x, y), base_part, font=font, fill=fill)
-                base_char = cluster[0] if cluster else ''
-                try:
-                    w_base = draw.textlength(base_char, font=font)
-                except AttributeError:
-                    w_base = getattr(font, "size", 20) * 0.6
-                draw.text((x + w_base * 0.86, y - shift_y), tone_part, font=font, fill=fill)
-            else:
-                draw.text((x, y), cluster, font=font, fill=fill)
-            
+            # Group contiguous non-elevated characters
+            j = i + 1
+            while j < len(text) and not (text[j] in tone_marks and text[j-1] in upper_vowels):
+                j += 1
+            chunk = text[i:j]
+            draw.text((x, y), chunk, font=font, fill=fill)
             try:
-                adv = draw.textlength(cluster, font=font)
+                bbox = draw.textbbox((0, 0), chunk, font=font)
+                x += bbox[2] - bbox[0]
             except AttributeError:
-                adv = len(cluster) * (getattr(font, "size", 20) * 0.5)
-            x += adv
+                x += len(chunk) * (size // 2)
+            i = j
 
     def typeset_image(self, image_bytes: bytes, translations: list) -> bytes:
         """
