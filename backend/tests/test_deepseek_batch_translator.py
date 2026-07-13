@@ -118,5 +118,7 @@ async def test_incomplete_batch_never_returns_source_as_translation():
     client.generate_chat_completion_result.return_value = CompletionResult(
         text='{"translations": []}', model="deepseek-v4-flash", attempts=1, prompt_tokens=1, completion_tokens=1, total_tokens=2,
     )
-    with pytest.raises(RuntimeError, match="incomplete"):
-        await DeepSeekBatchTranslator(client).translate_page_batch([_make_page_segments(1, 1)])
+    result = await DeepSeekBatchTranslator(client).translate_page_batch([_make_page_segments(1, 1)])
+    assert result.translations == {}
+    assert result.parse_outcome is not None
+    assert result.parse_outcome.outcome_type == "EMPTY_CONTENT"

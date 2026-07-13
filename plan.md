@@ -1,602 +1,278 @@
-# แผนแก้ Stage 1 OCR ช้าลงหลังเพิ่มการกู้ตัวอักษรเอียง
-
-## ขอบเขต
-
-แผนนี้แก้เฉพาะ performance ของ Stage 1 โดยต้องรักษาความสามารถกู้ข้อความเอียงที่เพิ่มล่าสุดไว้ ยังไม่อนุญาตให้เปลี่ยนโค้ดในรอบการวางแผนนี้
-
-## หลักฐานและสาเหตุ
-
-### สิ่งที่เห็นจาก log ใหม่
-
-- งานมี 20 หน้า แต่หน้าแรกใช้เวลารวม 53.37 วินาที และหน้า 2–4 แสดง 91.58–94.26 วินาที
-- ตัวเลขต่อหน้าปัจจุบันเริ่มจับเวลาก่อนเข้า `cpu_semaphore` จึงรวมทั้งเวลารอคิวและเวลาประมวลผลจริง ทำให้ยังใช้วิเคราะห์คอขวดแบบละเอียดไม่ได้
-- อย่างไรก็ตาม หน้า 4 หน้าแรกทำงานพร้อมกัน และแต่ละหน้าสามารถสร้าง OCR เต็มหน้าความละเอียดสูงหลายชุด จึงแย่ง CPU/RAM กันอย่างหนัก
-
-### สิ่งที่ยืนยันจากโค้ด
-
-- Primary OCR ทำงาน 1 รอบต่อหน้า
-- หาก `needs_recovery=True` ระบบจะขยายภาพทั้งหน้าเป็น 2 เท่า แล้วเรียก RapidOCR เพิ่มอีก 2 รอบด้วย shear `-0.12` และ `-0.22`
-- ภาพ 2 เท่ามีพิกเซลประมาณ 4 เท่า และ shear ยังขยายความกว้างอีก ดังนั้นหน้าที่เข้า recovery มีภาระรวมประมาณ 9–10 เท่าของ primary pass
-- Trigger ใหม่กว้างกว่าเดิม: เพียงมี confidence ต่ำหนึ่งบรรทัด, confidence เฉลี่ยต่ำ หรือพบ dark component ที่ไม่ทับกรอบเดิม ก็ทำให้ทั้งหน้าเข้า recovery
-- `_has_uncovered_text_component` คืนเพียง true/false ทั้งที่ตรวจพบตำแหน่ง component แล้ว ทำให้ข้อมูลตำแหน่งหายและระบบต้อง OCR ทั้งหน้าแทนการ crop เฉพาะจุด
-- `cpu_semaphore=4` อนุญาตให้ full-page 2× recovery หนัก ๆ ทำพร้อมกัน 4 หน้า ซึ่งอาจช้ากว่าการใช้ concurrency ต่ำกว่าเพราะ memory bandwidth และ ONNX CPU contention
-
-### Benchmark ยืนยันบน fixture ปัจจุบัน
-
-| Fixture | Primary OCR | Pipeline OCR ปัจจุบัน | ช้าลง |
-|---|---:|---:|---:|
-| `img/1.PNG` | 0.447s | 3.511s | 7.9× |
-| `img/2.PNG` | 0.595s | 2.731s | 4.6× |
-
-ผลนี้ยืนยันว่า hot path ใหม่แพง แม้ fixture จะมีขนาดเพียง 722×822 และ 713×533 ซึ่งเล็กกว่าหน้าจริง
-
-## เป้าหมาย
-
-- Stage 1 ของ Chapter 149 จำนวน 20 หน้า มี median ไม่เกิน 45 วินาทีจาก warm run 3 รอบ และ hard ceiling ไม่เกิน 60 วินาที
-- หน้าปกติใช้ full-page OCR เพียง 1 inference
-- หน้าที่พบข้อความแล้วต้องไม่ทำ full-page 2× shear recovery
-- รักษาการพบคำ `VOICE` ใน `img/1.PNG` และ `STONES` ใน `img/2.PNG` ครบ 2/2
-- จำนวนข้อความที่ primary OCR พบอยู่แล้วต้องไม่ลดลง
-- ไม่สร้าง bubble ซ้ำ, กรอบซ้อน หรือกรอบใหญ่ผิดปกติจาก recovery
-- peak CPU/RAM ต้องลดลงอย่างชัดเจนจาก implementation ปัจจุบัน และ UI ต้องไม่ค้างระหว่าง Stage 1
-
-## ลำดับการแก้แบบ TDD
-
-### P0 — เพิ่ม measurement ที่แยกคิวออกจากงานจริง
-
-1. แยกเวลาต่อหน้าเป็น:
-   - `queue_wait_ms`: เวลารอ `cpu_semaphore`
-   - `process_ms`: เวลาที่ทำ OCR จริงหลังได้ semaphore
-   - `base_pass_ms`, `component_scan_ms`, `roi_recovery_ms`
-2. บันทึกต่อหน้าโดยไม่เก็บภาพหรือข้อความจริง:
-   - trigger reason
-   - จำนวน base/ROI/full-page passes
-   - จำนวนพิกเซลที่ส่งเข้า OCR แต่ละ pass
-   - candidate ที่เพิ่มหรือแทนที่ได้จริง
-   - peak in-flight base และ recovery tasks
-3. เพิ่ม summary ของ Stage 1: wall time, queue p50/p95, process p50/p95, recovery hit rate และ recovery pixel ratio
-4. ทำ benchmark Chapter 149 แบบ warm 3 รอบก่อนแก้ algorithm เพื่อเป็น control เดียวกัน
-
-Tests:
-
-- timer ของหน้าที่รอ semaphore ต้องรายงาน queue wait แยกจาก process time
-- log ห้ามมี source dialogue, image bytes, API key หรือข้อมูลลับ
-- metric จำนวน pass และ pixel workload ต้องตรงกับ fake OCR calls
-
-### P1 — เปลี่ยนเป็น ROI-first italic recovery
-
-1. เปลี่ยน `_has_uncovered_text_component` ให้เป็นฟังก์ชันค้นหาและคืน immutable candidate boxes พร้อม score แทน boolean
-2. รวม dark components ที่อยู่ใกล้กันเป็นกลุ่มข้อความเดียว แล้วเพิ่ม padding และ clamp ให้อยู่ในขอบภาพ
-3. ตัด component ที่เป็น panel border, artwork/noise, ใหญ่เกินสัดส่วน หรืออยู่ไกลจากพื้นที่ bubble ที่น่าเชื่อถือ
-4. OCR เฉพาะ ROI ที่ primary OCR ยังไม่ครอบ โดยเริ่มจาก:
-   - scale 1.5×
-   - shear เดียวประมาณ `-0.18`
-   - จำกัดไม่เกิน 3 ROIs ต่อหน้า
-5. แปลงพิกัดจาก crop + scale + shear กลับสู่พิกัดภาพเดิม แล้ว deduplicate ก่อน grouping
-6. ห้ามทำ full-page 2× shear สำหรับหน้าที่ primary OCR พบข้อความแล้ว
-7. กรณี primary OCR ไม่พบข้อความเลย ให้คง enhanced full-page fallback เพียง 1 รอบตาม budget เพื่อไม่ให้หน้าเงียบหลุด
-
-Tests:
-
-- component detector ต้องคืนกรอบตำแหน่งและ reject เส้น panel border
-- หน้าที่มีข้อความและมี uncovered component ต้องเรียก 1 full-page base pass + bounded crop calls เท่านั้น
-- recovery call ต้องมีขนาดเล็กกว่าภาพเต็มหน้า
-- crop/shear coordinate mapping ต้องกลับตำแหน่งเดิมถูกต้อง
-- no-text page ต้องมี full-page calls รวมไม่เกิน 2 รอบ
-
-### P2 — ทำ trigger ให้เจาะจงและมี budget
-
-1. confidence ต่ำหนึ่งบรรทัดให้กู้เฉพาะ ROI ของบรรทัดนั้น ไม่เปิด recovery ทั้งหน้า
-2. uncovered component ให้กู้เฉพาะ component นั้น
-3. จำกัดต่อหน้า:
-   - `max_recovery_rois=3`
-   - recovery pixel budget ไม่เกิน 2× ของจำนวนพิกเซล base image
-   - max attempts ต่อ ROI
-4. shear รอบที่สองใช้ได้เฉพาะเมื่อรอบแรกไม่เพิ่ม candidate ที่ผ่าน quality score และยังเหลือ pixel budget
-5. full-page italic fallback ถ้าจำเป็นจริง ต้องอยู่หลัง feature flag, ใช้ shear เดียว, ไม่ upscale 2× และใช้เฉพาะ no-text page หรือ targeted recovery ที่มีหลักฐานว่ายังขาดข้อความ
-6. เก็บเหตุผลที่ข้าม recovery เช่น `budget_exhausted`, `no_valid_component`, `already_covered`
-
-Tests:
-
-- low-confidence line เดียวต้องไม่ทำให้เกิด full-page recovery
-- ROI cap, pixel cap และ attempt cap ต้องหยุดงานได้จริง
-- second shear ต้องไม่ทำงานเมื่อ first shear สำเร็จ
-- budget หมดต้องไม่เกิด retry loop
-
-### P3 — แยก concurrency ตามน้ำหนักงาน
-
-1. แยก semaphore ของ base OCR กับ recovery OCR เพื่อไม่ให้ crop recovery หลายหน้าแย่งทรัพยากรกับ primary pass
-2. benchmark concurrency 1/2/3/4 บน Chapter 149 และเลือกค่าที่ wall time ต่ำสุด โดยไม่ดูแค่จำนวนงานพร้อมกัน
-3. ค่าเริ่มทดสอบ:
-   - base OCR concurrency = 4
-   - recovery concurrency = 1–2
-4. หาก RapidOCR instance เดียวมี contention/thread-safety ให้ทดสอบ worker-local instance pool เทียบกับ shared instance โดยวัด RAM และ throughput
-5. ย้ายค่าเป็น settings เช่น `OCR_BASE_CONCURRENCY`, `OCR_RECOVERY_CONCURRENCY`, `OCR_RECOVERY_MAX_ROIS`, `OCR_RECOVERY_MAX_PIXEL_RATIO`
-6. ใช้ weighted/pixel-aware admission เพื่อไม่ให้ภาพใหญ่หลายภาพเข้า recovery พร้อมกัน
-
-Tests:
-
-- max in-flight ต้องไม่เกินค่าที่ตั้ง
-- recovery หนักต้องไม่ block base queue ทั้งหมด
-- settings ผิดช่วงต้อง fail fast หรือถูก clamp อย่างชัดเจน
-- ผลลัพธ์และ reading order ต้อง deterministic ไม่ว่า concurrency เท่าใด
-
-### P4 — รักษาคุณภาพและการรวม bubble
-
-1. เก็บ primary candidate เป็นหลักและแทนที่เมื่อ recovery candidate ชนะด้วย score ที่ดูทั้ง confidence, ตัวอักษร, punctuation และความครบของคำ
-2. candidate ใหม่ต้องผ่าน overlap/size/position validation ก่อนเพิ่ม
-3. deduplicate ก่อน `_group_lines` เพื่อป้องกันข้อความซ้ำและกรอบทับกัน
-4. เก็บ primary line count, recovered line count และ rejected candidate count เพื่อ audit
-5. เพิ่ม fixture ระดับหน้าเต็มจาก Chapter 149 หน้า 8 และ 15 เมื่อมีไฟล์ต้นฉบับที่ reproducible; fixture crop ปัจจุบันยังคงเป็น regression ขั้นต่ำ
-
-Tests:
-
-- `img/1.PNG` ต้องยังพบ `VOICE`
-- `img/2.PNG` ต้องยังพบ `STONES`
-- primary candidate ที่ถูกต้องห้ามถูก candidate confidence สูงแต่ข้อความแย่กว่าเขียนทับ
-- ห้ามเกิด duplicate overlap ใหม่หรือกรอบเกินขอบภาพ
-- bubble grouping และ reading order ต้องไม่เปลี่ยนแบบ nondeterministic
-
-## Benchmark และเกณฑ์ตัดสิน
-
-รันด้วยภาพและเครื่องเดียวกันอย่างน้อย 3 warm runs แล้วใช้ median:
-
-1. Primary-only control
-2. Implementation ปัจจุบันที่ full-page 2× สอง shear
-3. ROI-first ที่ recovery concurrency 1
-4. ROI-first ที่ recovery concurrency 2
-5. ROI-first ที่ base concurrency 2/3/4
-
-ต้องรายงาน:
-
-- Stage 1 wall time
-- queue wait และ process p50/p95
-- base/ROI/full-page inference count
-- OCR pixel workload รวม
-- CPU peak, RAM peak
-- recovery trigger rate และ useful recovery rate
-- จำนวน segments ต่อหน้าและ fixture keyword recall
-
-เลือก configuration ที่เร็วที่สุดเฉพาะเมื่อผ่าน quality gates ทั้งหมด ห้ามเลือกจาก concurrency สูงสุดหรือค่าเฉลี่ยเวลาเพียงอย่างเดียว
-
-## Acceptance Criteria
-
-- Chapter 149 Stage 1 median ≤45s และทุก run ≤60s
-- detected-text page มี full-page OCR inference = 1
-- recovery pixel workload ต่อหน้า ≤2× base-pixel equivalent
-- `VOICE`/`STONES` recall = 2/2
-- primary segment retention = 100%
-- duplicate/oversized/out-of-bounds boxes ใหม่ = 0
-- Stage 1 error หรือหน้าเงียบจาก budget = 0; หากยัง unresolved ต้องมี review flag ชัดเจน
-- backend tests ผ่านทั้งหมดและ touched-code coverage ≥80%
-
-## Rollout และ Rollback
-
-1. แยก feature flags สำหรับ ROI recovery, second shear และ recovery concurrency
-2. เปิดตามลำดับ: tests → local Chapter 149 replay → canary 10% → 50% → 100%
-3. rollback ทันทีหาก Stage 1 p95 แย่กว่า control เกิน 10%, keyword/segment recall ลด, กรอบผิดปกติเพิ่ม หรือ RAM peak เกินเพดาน
-4. เก็บ implementation ปัจจุบันเป็น benchmark control เท่านั้น ไม่ใช้เป็น fallback อัตโนมัติใน production เพราะเป็นต้นเหตุของ resource amplification
-
-## Handoff สำหรับโมเดลที่ลงมือแก้
-
-- ทำตาม P0 → P1 → P2 → P3 → P4 แบบ test-first
-- ห้ามแก้ด้วยการปิด italic recovery ทั้งหมด
-- ห้ามเพิ่ม full-page transform variants เพิ่ม
-- ห้ามลดคุณภาพเพื่อให้ตัวเลขเร็วขึ้น; ต้องผ่าน fixture และ segment-retention gates ก่อน
-- อัปเดต `CHANGELOG.md`, รัน backend regression/coverage และทำ code review ก่อน commit
-
----
-
-# แผนเสริมจาก Log ล่าสุด: แยก AI Recovery ออกจาก Stage 3 และเก็บ Log ถาวร
-
-## ข้อจำกัดในการอ่าน Log ปัจจุบัน
-
-- Backend ใช้ `logging.basicConfig` ส่งข้อความไป console เท่านั้น และไม่มี file handler
-- หน้าต่าง “Manhwa Backend API” ไม่ได้ผูกกับ terminal session ของ Codex จึงอ่านประวัติย้อนหลังโดยตรงไม่ได้
-- รอบนี้วิเคราะห์ได้จากภาพ log ที่แนบและโค้ดปัจจุบัน
-- ต้องเพิ่ม rotating log file แบบ structured เพื่อให้ตรวจ job ล่าสุดย้อนหลังได้โดยไม่ต้องอาศัย screenshot
-
-## หลักฐานจาก Job ล่าสุด
-
-- เวลาหลังเริ่ม Stage 1 ถึงจบงานรวมประมาณ **722.86 วินาที (12 นาที 3 วินาที)**:
-
-| Stage | เวลา | สัดส่วนโดยประมาณ | ข้อสรุป |
-|---|---:|---:|---|
-| Stage 1 OCR | 447.19s | 61.9% | คอขวดใหญ่สุด; เฉลี่ย wall time 22.36s/หน้า |
-| Stage 2 primary translation | 150.17s | 20.8% | 4 batches ทำต่อคิวและมี retry/partial recovery ล้ม |
-| Stage 3 recovery + render/upload | 125.50s | 17.4% | ประมาณ 111.85s เป็น AI/QC ก่อน render |
-
-- Stage 1 จบใน **447.19 วินาที** เทียบกับ baseline ก่อนเพิ่ม full-page shear ที่ 32.47 วินาที จึงช้าลงประมาณ **13.8 เท่า**
-- Page timing ของ Stage 1 เป็นลักษณะ wave/queue: หน้า 1 = 53.37s, หน้า 4 = 91.58s, หน้า 5 = 132.43s และหน้าสุดท้าย = 447.01s ซึ่งสอดคล้องกับงานหนัก 4 หน้าแย่ง CPU/RAM และหน้าถัดไปรอ semaphore
-- Stage 2 ใช้ **150.17 วินาที** และได้ 55 translated segments จาก 4 batches:
-  - Batch 1 รอบแรกล้ม แล้ว retry สำเร็จรวม 54.59s ได้ 11 segments
-  - Batch 2 เก็บ partial ได้ 6 segments แต่ missing-only recovery 22 IDs ล้มหลังรอประมาณ 55.76s
-  - Batch 3 สำเร็จ 21.56s ได้ 28 segments
-  - Batch 4 สำเร็จ 18.26s ได้ 10 segments
-- เวลา Batch 1–4 รวมกันแทบเท่ากับ Stage 2 ทั้งหมด ยืนยันว่า serial contextual batching อยู่บน critical path โดยตรง
-- Job `75f70a1c-a55d-4621-8e68-8f2a0e772132` รายงาน Stage 3 รวม **125.50 วินาที** หรือเฉลี่ย 6.27 วินาที/หน้า
-- หน้าสุดท้ายรายงาน `processed in 13.65s` โดย Render 4.00s และ Upload 0.44s
-- ดังนั้นช่วง render + sequential upload ที่มองเห็นใช้ไม่เกินประมาณ **13.65 วินาที** แต่มีเวลาประมาณ **111.85 วินาที** ก่อน render wave หรือราว **89% ของ Stage 3**
-- Page 19 ไม่มี bubble จึง Render 0.00s แต่ยัง Upload 0.41s ยืนยันว่า render ไม่ใช่คอขวดหลักของ 125.50 วินาที
-- Upload แต่ละหน้าที่เห็นอยู่ประมาณ 0.40–0.54 วินาที แม้ปัจจุบันทำทีละหน้า จึงมีโอกาสลดเวลาได้อีก แต่ไม่ใช่ต้นเหตุหลัก
-- Stage 3 ส่ง page recovery แบบต่อคิวอย่างน้อย 9 หน้า ได้แก่หน้า 3–10 และ 18 รวมอย่างน้อย **41 untranslated segments** จาก log ที่มองเห็น
-- งานจบด้วยคำเตือน `some dialogue regions need review` แปลว่าเสียเวลา recovery สูงแล้วยังไม่ปิดช่องว่างคุณภาพทั้งหมด
-- มี access log จาก `GET /api/v1/jobs/{job_id}` จำนวนมากตลอดงาน เป็น polling noise ที่บดบัง event สำคัญ; ไม่ใช่คอขวดหลัก แต่ควร sample/filter successful poll logs
-
-## Root Cause จากโค้ด
-
-Stage 3 เริ่มจับเวลาก่อนลูปเตรียม `page_render_jobs` และลูปนี้ยังทำงาน AI/quality แบบต่อคิว:
-
-1. ตรวจ missing/English leakage ต่อหน้า
-2. เรียก page-level DeepSeek recovery ทีละหน้า
-3. ตรวจ Quality Gate ต่อ segment
-4. หากไม่ผ่าน เรียก single-segment QC recovery
-5. หากผลยังว่างหรือตรงกับต้นฉบับ เรียก emergency fallback อีกครั้ง
-6. หลังจบทุกหน้าแล้วจึงเริ่ม render พร้อมกัน
-
-ผลคือ ID เดียวอาจถูกส่งซ้ำผ่าน page recovery, QC recovery และ emergency fallback และเวลาทั้งหมดถูกนับเป็น Stage 3 ทั้งที่ไม่ใช่งาน render
-
-## P5 — เพิ่ม Persistent Structured Logging
-
-1. เพิ่ม `RotatingFileHandler` ที่เปิด/ปิดและกำหนดตำแหน่งได้ผ่าน settings เช่น `LOG_TO_FILE`, `LOG_DIR`, `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT`
-2. ใช้ไฟล์ JSON Lines หรือ structured key/value ที่ filter ตาม `job_id`, `run_id`, `stage`, `page_index`, `segment_id`, `event` ได้
-3. หมุนไฟล์ตามขนาดและเก็บย้อนหลังแบบจำกัด เช่น 10 MB × 5 files เพื่อไม่ให้ disk โตไม่หยุด
-4. flush log สำคัญเมื่อ stage/job จบหรือเกิด exception เพื่อให้ crash แล้วข้อมูลยังอยู่
-5. ห้ามบันทึก API key, Authorization header, raw image bytes, full prompt, full dialogue หรือ signed URL; log object key/host และ count แทน
-6. บันทึก timestamp แบบ timezone ชัดเจนและ duration จาก `perf_counter`
-7. เพิ่ม startup event ระบุ logging mode และไฟล์ที่ใช้งานโดยไม่เปิดเผย absolute system path ในข้อความสาธารณะ
-8. แยก application pipeline log ออกจาก HTTP access log และ sample/suppress เฉพาะ polling `200 OK` ที่ซ้ำ โดยยังเก็บ non-2xx และ latency ผิดปกติครบ
-
-Tests:
-
-- เปิด file logging แล้วต้องสร้าง/append/rotate ได้
-- ปิด setting แล้วต้องไม่เขียนไฟล์
-- filter ตาม job ID ต้องได้ lifecycle ครบ Stage 1–4
-- secret/header/dialogue redaction tests ต้องผ่าน
-- exception ต้องมี type/stack trace แต่ไม่มี payload ลับ
-- successful status polling ต้องไม่ flood pipeline log; non-2xx poll ต้องยังค้นพบได้
-
-## P6 — ย้าย Translation/QC Recovery กลับเข้า Stage 2
-
-1. กำหนดขอบเขต stage ใหม่ให้ชัดเจน:
-   - Stage 2 = translation, completeness accounting, QC และ provider-local recovery
-   - Stage 3 = inpaint, typeset และ upload เท่านั้น
-2. หลัง primary translation ให้สร้าง immutable per-segment state map:
-   - `PRIMARY_VALID`
-   - `MISSING`
-   - `QC_FAILED`
-   - `RECOVERING`
-   - `RESOLVED`
-   - `NEEDS_REVIEW`
-3. ประเมิน Quality Gate หนึ่งครั้งต่อผลลัพธ์ version และรวม unresolved IDs เป็น recovery queue เดียว
-4. ห้ามมี page recovery, QC recovery และ emergency fallback ที่ต่างคนต่างเรียก ID เดียวกัน
-5. ใช้ request/attempt budget ต่อ ID; เมื่อครบ budget ให้เป็น `NEEDS_REVIEW` และหยุด retry
-6. เก็บ valid partial translations และส่งเฉพาะ missing/invalid IDs ตามแผน DeepSeek เดิม
-7. DeepSeek ต้อง retry ด้วย provider/model ที่ผู้ใช้เลือกเท่านั้น ห้ามข้ามไป Groq หรือ DeepSeek model อื่น
-8. Groq ใช้ fallback ได้เฉพาะภายใน Groq lane ตาม policy เดิม และห้ามข้ามไป DeepSeek
-9. เมื่อ Stage 2 จบ ต้องได้ final result map ที่ immutable; Stage 3 อ่านอย่างเดียวและห้ามเรียก AI client
-
-Tests:
-
-- assert จำนวน AI calls ใน Stage 3 = 0
-- ID ที่ primary สำเร็จแล้วต้องไม่ถูก recovery
-- ID ที่ขาดต้องเข้าสู่ recovery queue ครั้งเดียวและไม่เกิน attempt budget
-- partial response ต้องรักษา valid IDs และ retry เฉพาะ missing IDs
-- DeepSeek/Groq provider-model isolation tests ต้องผ่าน
-- state transition ผิดลำดับหรือ duplicate completion ต้องถูก reject
-
-## P7 — ทำ Recovery Queue แบบ Bounded และ Context-safe
-
-1. รวม missing/QC-failed segments ตาม page proximity และ token budget แทนการยิงทีละ segment
-2. ใช้ bounded waves เพื่อให้ยังส่ง context ของ wave ก่อนหน้าไป wave ถัดไปได้ โดยไม่บังคับทุก request ต่อคิว
-3. เริ่ม benchmark recovery concurrency:
-   - DeepSeek Flash = 2–3 groups
-   - DeepSeek Pro = setting แยกและต่ำกว่า Flash
-   - Groq = คง provider-local semaphore เดิม
-4. merge ผลตาม segment ID และ reading order แบบ deterministic
-5. เก็บ attempt ledger กลางสำหรับ primary/missing-only/QC recovery เพื่อป้องกัน retry ซ้ำคนละ branch
-6. แยก issue ที่ซ่อมด้วย deterministic rule ได้ออกจาก AI queue; semantic issues เท่านั้นที่เรียก model
-7. บันทึก `recovery_queue_ms`, `api_ms`, `parse_ms`, `qc_ms`, `attempts`, `resolved_count`, `unresolved_count` โดยไม่เก็บ dialogue
-8. สำหรับ primary batch ให้เปรียบเทียบสอง policy โดยใช้ context snapshot เดียวกัน:
-   - serial control ปัจจุบัน
-   - checkpoint waves ขนาด 2 batches สำหรับ Flash และค่าต่ำกว่าสำหรับ Pro
-9. หาก batch คืน partial เช่น Batch 2 รอบนี้ที่ valid 6/missing 22 ให้ split เฉพาะ 22 IDs ตาม token budget และทำ bounded recovery groups; ห้ามรอ single missing-only request ก้อนใหญ่ซ้ำจน timeout
-10. ตั้ง per-request deadline และ total recovery deadline เพื่อไม่ให้ batch เดียวกิน critical path ประมาณ 55 วินาทีโดยไม่มีผลเพิ่ม
-
-Tests:
-
-- unresolved 10 IDs ต้องทำเป็น bounded groups ไม่ใช่ 10 sequential calls
-- max in-flight และ provider semaphore ต้องไม่เกินค่า config
-- ordered merge/context snapshot ต้อง deterministic
-- attempt ledger ต้องป้องกัน ID เดิมถูกส่งทั้ง page/QC/emergency path
-- timeout/429 ต้อง backoff และ terminate ตาม budget
-- replay pattern valid 6/missing 22 ต้องรักษา 6, split เฉพาะ 22, และไม่มี request ใดส่ง valid IDs ซ้ำ
-- checkpoint wave ต้องลด critical-path wall timeโดยไม่ลด gender/context fixture accuracy
-
-## P8 — Pipeline Render และ Upload โดยรักษาลำดับ Publish
-
-1. เมื่อหน้าหนึ่ง render เสร็จ ให้ upload ได้ทันทีด้วย producer/consumer queue แทนการรอ render ครบทุกหน้า
-2. ใช้ semaphore แยก:
-   - CPU render/inpaint/typeset
-   - R2 upload
-3. เริ่ม benchmark upload concurrency 2/4/6 และเลือกค่าที่ p95 ดีโดยไม่สร้าง network saturation
-4. เก็บ `staged_pages` แบบ immutable แล้ว sort ด้วย page index ก่อน atomic publish
-5. หน้าไม่มี approved bubble ให้ข้าม inpaint/typeset และส่ง raw bytes เข้า upload ตามเดิม
-6. coalesce progress DB updates เพื่อไม่ให้การอัปเดตทีละหน้ากลายเป็นคอขวด
-7. log แยก `render_queue_ms`, `render_ms`, `upload_queue_ms`, `upload_ms` และ end-to-end page latency
-
-Tests:
-
-- upload ต้องเริ่มได้ก่อน render ทุกหน้าจบ
-- completion order สลับกันได้ แต่ publish order ต้อง 1..N เสมอ
-- cancellation ก่อน publish ต้องไม่เผย staged chapter บางส่วน
-- upload failure ต้อง retry แบบ bounded และไม่เขียน page ซ้ำ
-- no-bubble page ต้องไม่เรียก inpaint/typeset
-
-## P9 — แก้ Metric ที่ทำให้ตีความผิด
-
-1. แยก Stage 3 เป็น summary ย่อย:
-   - `3A result assembly` ซึ่งควรไม่มี AI calls
-   - `3B render`
-   - `3C upload`
-   - `3D publish staging`
-2. เวลา `Page processed` ต้องรายงานทั้ง queue wait และ active duration ไม่ใช้ timestamp ที่เริ่มก่อนงานรอคิวเป็น compute time
-3. Stage wall time ใช้เวลาจริงของ critical path; ห้ามใช้ผลรวม per-page durations เป็น wall time
-4. log จำนวน AI calls แยกตาม primary/recovery และ stage เพื่อจับ regression ที่ AI หลุดกลับเข้า Stage 3
-5. เพิ่ม final job summary ที่รวม Stage 1, Stage 2 primary, Stage 2 recovery, Stage 3 render, Stage 3 upload และ DB/publish
-
-## Acceptance Criteria เพิ่มเติม
-
-- Stage 3 ต้องมี AI calls = 0
-- Stage 3 ของ Chapter 149 จำนวน 20 หน้า median ≤18 วินาที และ hard ceiling ≤25 วินาทีจาก warm run 3 รอบ
-- เวลาที่เคยซ่อนก่อน render ประมาณ 111.85 วินาทีต้องย้ายไป metric Stage 2 recovery และลดลงด้วย bounded queue
-- duplicate recovery request ต่อ segment = 0
-- unresolved ทุก ID ต้องเป็น `NEEDS_REVIEW` พร้อม issue code; ห้ามเงียบหรือ publish source text เป็นคำแปล
-- render/upload output, page count และ page order ต้องเหมือน baseline
-- rotating log ต้องค้น job ล่าสุดย้อนหลังได้และไม่มี secret/dialogue leakage
-- เมื่อทำร่วมกับแผน Stage 1 ให้รายงาน critical path ทั้งตอนใหม่; ห้ามอ้างว่าเร็วขึ้นจากการย้ายชื่อ stage เพียงอย่างเดียว
-- Stage 1 ต้องลดจาก baseline ล่าสุด 447.19s ตามเกณฑ์ Stage 1 เดิม โดยคง fixture recall
-- Stage 2 primary + bounded recovery median ≤75s และ request เดี่ยวต้องไม่ครอง critical pathเกิน configured deadline
-- end-to-end เป้าหมายรอบแรก ≤145s สำหรับ 20 หน้า และ stretch target ≤110s หลัง context checkpoint waves ผ่าน quality gates
-- polling access-log volume ต้องลดลงอย่างน้อย 90% โดย error visibility ไม่ลดลง
-
-## ลำดับทำร่วมกับแผน Stage 1
-
-1. ทำ P0 Stage 1 metrics และ P5 persistent logging ก่อน เพื่อเก็บ baseline ที่เชื่อถือได้
-2. ทำ P1–P2 ROI-first OCR และ budget
-3. ทำ P6 ย้าย recovery ไป Stage 2 พร้อม attempt ledger
-4. ทำ P7 bounded recovery queue
-5. ทำ P3 OCR concurrency และ P8 render/upload pipeline
-6. ทำ P4/P9 quality + metric verification
-7. replay Chapter 149 อย่างน้อย 3 warm runs แล้วเปรียบเทียบ Stage 1, Stage 2 recovery, Stage 3 และเวลารวมทั้งตอน
-
----
-
-# แผนเสริมด้านคุณภาพ: Source OCR ถูกต้องและหนึ่ง Bubble แปล/วาดเพียงครั้งเดียว
-
-## Capability
-
-ระบบต้องสร้าง source transcript ที่ตรวจสอบได้จากแต่ละ speech bubble ก่อนส่ง AI และต้องมี translation/render instruction เพียงหนึ่งรายการต่อ visual bubble แม้ OCR จะทดลองหลาย transform หรือมี recovery หลายรอบ
-
-## หลักฐานจาก Fixture จริง
-
-ผล OCR ปัจจุบันจากไฟล์ใน `img/` ยังผิดดังนี้:
-
-| Fixture | OCR ปัจจุบัน | Source ที่ต้องได้ |
-|---|---|---|
-| `img/1.PNG` bubble 1 | `LO SHU'S VOICE!!` | `LU SHU'S VOICE!!` |
-| `img/1.PNG` bubble 2 | `OHS 01 PLEASE HELP ME TRANSLAT....` | `LU SHU, PLEASE HELP ME TRANSLATE...` |
-| `img/1.PNG` bubble 3 | `EH, WHERE 15 HE?` | `EH, WHERE IS HE?` |
-| `img/2.PNG` | `DON'T! IS THIRTY-FINE OKAY? ...` | `DON'T! IS THIRTY-FIVE OKAY? TAKE EVERYTHING WITH THIRTY-FIVE STONES!` |
-
-ดังนั้นปัญหาไม่ได้อยู่ที่โมเดลแปลอย่างเดียว เพราะ source ที่ส่งเข้าโมเดลมี `LO`, `OHS 01`, `15` และ `THIRTY-FINE` ตั้งแต่ต้น
-
-ผลภาพซ้ำ/ทับกันเกิดได้จาก contract ปัจจุบัน:
-
-- OCR transform หลายชุดสามารถเพิ่ม candidate ที่ข้อความต่างกันเล็กน้อยเป็นคนละ line/segment เพราะ duplicate check ใช้ same-text หรือ IoU สูงเป็นหลัก
-- `_group_lines` เดาความเป็น bubble จากระยะ/ตำแหน่ง โดยไม่มี bubble identity หรือ contour ที่คงที่
-- recovery result สามารถกลายเป็นรายการเพิ่ม แทนที่จะ replace candidate ของ visual region เดิม
-- typesetter รับเพียง `{box, text}` แล้ววาดทุกรายการตามลำดับ โดยไม่มี `region_id`, uniqueness validation หรือ collision preflight
-- inpainter ล้างตามกล่อง OCR แต่ถ้ากล่องไม่ครอบทุกบรรทัด อักษรอังกฤษเดิม เช่น `STONES?` สามารถเหลืออยู่ใต้/ข้างคำแปล
-
-## User-visible Translation Contract
-
-Fixture ต้องได้ความหมายอย่างน้อยดังนี้ โดยชื่อใช้รูปมาตรฐานจาก glossary เดียวกันทั้งตอน:
-
-### `img/1.PNG`
-
-1. `เสียงของลูซู!!`
-2. `ลูซู ช่วยฉันแปลหน่อย...`
-3. `เอ๊ะ เขาอยู่ไหน?`
-
-### `img/2.PNG`
-
-- `ไม่! 35 โอเคไหม? เอาทั้งหมดเลยด้วยราคา 35 หินวิญญาณ!`
-- อนุญาตใช้เลข `35` แทนคำว่า `สามสิบห้า` แต่ค่าต้องปรากฏครบสองตำแหน่งและความหมายห้ามเปลี่ยน
-
-ข้อความข้างต้นเป็น semantic acceptance target ไม่ใช่การ hardcode คำแปลเข้า production code
-
-## Invariants ที่ห้ามละเมิด
-
-1. หนึ่ง visual bubble region มี selected source transcript ได้หนึ่งชุด
-2. OCR transforms/recovery สร้าง candidate evidence เท่านั้น ห้ามสร้าง translation unit ใหม่โดยตรง
-3. หนึ่ง `region_id` มี `OCRSegment` ที่ active ได้ไม่เกินหนึ่งรายการ
-4. หนึ่ง `region_id` มี final translation และ render instruction ได้ไม่เกินหนึ่งรายการ
-5. recovery ต้อง replace state ของ region เดิมแบบ immutable ห้าม append สำเนา
-6. bubble คนละ contour ต้องไม่ถูก merge แม้ข้อความเหมือนกันหรืออยู่ใกล้กัน เช่นคำทักทายในภาพ 3
-7. source ที่ยังมี OCR corruption ต้องเป็น `SOURCE_NEEDS_REVIEW` และห้ามส่งแปล/เผยแพร่แบบเงียบ
-8. inpaint coverage ต้องครอบ source glyphs ทั้งหมดของ region แต่ห้ามออกนอก safe bubble mask ไปทับภาพวาด
-9. Stage 3 ต้องปฏิเสธ duplicate/colliding render instructions ก่อนแก้ภาพ
-
-## P10 — เพิ่ม Bubble Region และ Candidate Contract
-
-1. เพิ่ม immutable contract แยกชัดเจน:
-   - `BubbleRegion`: `region_id`, page, contour/mask, safe interior, reading order
-   - `OCRCandidate`: region, transform, polygon/box, raw text, confidence, component coverage
-   - `SelectedSource`: region, normalized transcript, selected evidence, source status, issue codes
-   - `RenderInstruction`: region, clean mask/union box, safe text box, final Thai
-2. สร้าง `region_id` แบบ deterministic จาก page + contour/quantized geometry เพื่อให้ primary/recovery อ้าง region เดิมได้
-3. map OCR lines จากทุก transform เข้า bubble region ก่อนทำ candidate selection
-4. `segment_id` อ้าง region identity ไม่ใช่ลำดับชั่วคราวที่เปลี่ยนเมื่อ candidate เพิ่ม/หาย
-5. รักษา backward compatibility ที่ boundary ชั่วคราว แต่ห้ามแปลงข้อมูลแล้วทำ region identity หาย
-
-Tests:
-
-- region ID ต้อง deterministic เมื่อ transform/polygon ขยับเล็กน้อย
-- candidates หลาย transform ใน contour เดียวต้องอยู่ region เดียว
-- bubble contour คนละอันที่อยู่ชิดกันต้องได้คนละ region
-- request contract ต้อง reject duplicate active `region_id`
-
-## P11 — Source OCR Quality Gate ก่อน Translation
-
-1. สร้าง `SourceQualityGate` แยกจาก Translation Quality Gate เพื่อตรวจ:
-   - token ผสมตัวเลข/ตัวอักษรผิดธรรมชาติ เช่น `O1`, `15 HE`
-   - truncated word เช่น `TRANSLAT....`
-   - transform disagreement สูง
-   - coverage ยังเหลือ dark text components
-   - repeated phrase ขัดกัน เช่น `THIRTY-FINE` กับ `THIRTY-FIVE`
-   - proper noun ต่างจาก locked glossary/entity ใกล้เคียงอย่างมีนัยสำคัญ
-2. source ที่ fail gate เข้า targeted ROI re-recognition ตาม pixel budget ไม่ส่งเข้า AI แปลทันที
-3. ทำ line-crop recognition ensemble แบบ bounded: original, contrast/CLAHE และ shear ที่มีหลักฐาน โดยใช้แผน ROI-first เดิม
-4. เลือก candidate ด้วยคะแนนรวม:
-   - confidence
-   - visual component coverage
-   - agreement ระหว่าง transforms
-   - punctuation/clause completeness
-   - English token plausibility
-   - glossary/entity support
-5. lexical/glossary correction ใช้ได้เฉพาะเมื่อ edit/confusion path สั้นและมี visual candidate สนับสนุน ห้ามเดาคำใหม่จากภาษาอย่างเดียว
-6. รองรับ confusion แบบทั่วไป เช่น `I/1`, `S/5`, `O/0`, `V/F`, `U/O` โดยเก็บ raw evidence ไว้ audit
-7. repeated term ภายใน bubble/chapter ต้องใช้ canonical form เดียวกันเมื่อ visual evidence สนับสนุน เช่น `THIRTY-FIVE` สองตำแหน่ง
-8. หากยังตัดสินไม่ได้ ให้ `SOURCE_NEEDS_REVIEW` พร้อม crop/evidence reference แบบ local/debug เท่านั้น
-
-Tests:
-
-- `img/1.PNG` ต้องได้ source exact ทั้งสาม clauses ตามตาราง
-- `img/2.PNG` ต้องได้ `THIRTY-FIVE` สองครั้งและ `STONES!`
-- ห้ามมี `LO SHU`, `OHS 01`, `15 HE`, `THIRTY-FINE` ใน selected source
-- confidence สูงแต่ token ผิดต้องไม่ผ่าน Source Quality Gate
-- เลข `35` ที่เป็นตัวเลขจริงต้องไม่ถูกแก้เป็น `IS`; confusion correction ต้องอาศัยตำแหน่งและ visual consensus
-- proper noun ที่ไม่อยู่ glossary ต้องไม่ถูก autocorrect หากไม่มี candidate consensus สนับสนุน
-- glossary ต้องไม่เปลี่ยนคำที่ edit distance/visual evidence ไม่รองรับ
-- unresolved source ต้องไม่ถูกส่งเข้า translator
-
-## P12 — Candidate Consensus และ Bubble-level Grouping
-
-1. เลิก append shear/enhanced detections ตรงเข้าสู่ `lines`; เก็บเป็น candidates ของ region
-2. ทำ spatial association ด้วย bubble contour membership ก่อน แล้วใช้ overlap/containment/center distance ภายใน region
-3. รวม multi-line transcript ตาม baseline/reading order ภายใน bubble maskเดียวกัน
-4. ใช้ character/word consensus ระหว่าง variants เพื่อแก้หนึ่งตัวอักษรโดยไม่เพิ่ม segment ใหม่
-5. candidate ที่ครอบบางบรรทัดต้องไม่แยกเป็น bubble ใหม่ หากอยู่ contour เดียวกับ candidate ที่ครบกว่า
-6. NMS/duplicate collapse ต้องดูทั้ง containment, normalized edit similarity และ shared region ไม่พึ่ง IoU 0.7 อย่างเดียว
-7. ห้าม merge ข้าม region แม้ normalized text เหมือนกัน เพื่อรักษา bubble ทักทายสองช่องในภาพ 3
-
-Tests:
-
-- base `THIRTY-FINE` + recovered `THIRTY-FIVE` ต้องเหลือ selected region หนึ่งรายการ
-- full transcript + partial transcript ใน bubble เดียวต้องเหลือ translation unit เดียว
-- candidate boxes ซ้อนกันแต่คนละ bubble contour ต้องคงสอง regions
-- reading order ต้องคงที่เมื่อ candidate input สลับลำดับ
-
-## P13 — Translation Fidelity Gate สำหรับ Source ที่ตรวจแล้ว
-
-1. ส่ง translator เฉพาะ `SOURCE_VERIFIED` หรือ `SOURCE_RECOVERED`
-2. แนบ locked entity glossary เพื่อให้ `LU SHU` ใช้ `ลูซู` สม่ำเสมอทั้งตอน
-3. เพิ่ม semantic checks:
-   - proper noun coverage
-   - question/negation preservation
-   - clause count/completeness
-   - repeated numeric value preservation รวมเลขไทย/คำอ่านไทย
-   - no English/OCR garbage leakage
-4. สำหรับ `img/2.PNG` ต้องตรวจว่า 35/สามสิบห้าปรากฏสองครั้ง ไม่ใช่ตรวจแค่ชุดตัวเลข ASCII ปัจจุบัน
-5. translation repair ห้ามแก้ selected source; หากพบว่า source ผิดต้องย้อนกลับ Source OCR recovery state อย่างชัดเจน
-6. เก็บ source issue กับ translation issue คนละ namespace เพื่อไม่ให้ AI translation ถูกใช้ปกปิด OCR corruption
-
-Tests:
-
-- semantic targets ของ `img/1.PNG` ครบสามข้อความ
-- `img/2.PNG` ต้องรักษา negation และจำนวน 35 ทั้งสองตำแหน่ง
-- `ลูซู` ต้องตรง glossary ทุก bubble
-- output ที่ยังมี `O1`, `15`, `THIRTY-FINE` หรือ source English ต้องไม่ผ่าน
-
-## P14 — One Bubble, One Render Instruction
-
-1. เปลี่ยน `approved` จาก list ของ `{box, text}` เป็น immutable map keyed by `region_id`
-2. recovery update ต้อง replace value ใน map เดิม และ attempt ledger ต้องป้องกันผลซ้ำ
-3. ก่อน inpaint/typeset ทำ render preflight:
-   - unique region IDs
-   - box/mask อยู่ในภาพ
-   - no duplicate instruction
-   - no unsafe collision
-   - final text ผ่าน QC
-4. หาก instruction สองรายการอ้าง region เดียว ให้ reject upstream bug ห้ามวาดทั้งคู่
-5. หาก instruction คนละ region แต่ text boxes ชนกัน ให้ fit/reflow ใน safe interior หรือ `NEEDS_REVIEW`; ห้ามวาดทับ
-6. typesetter ต้องรับ region identity และวาดหนึ่งครั้งต่อ region
-7. ทำ idempotency test: เรียก render ด้วย final state เดิมซ้ำต้องไม่ทำให้มีข้อความเพิ่ม
-
-Tests:
-
-- duplicate `region_id` ต้องถูก reject ก่อนแก้ภาพ
-- primary + recovery result ของ region เดียวต้องวาดเพียงครั้งเดียว
-- two distinct greeting bubbles ต้องวาดแยกคนละหนึ่งครั้ง
-- collision preflight ต้องจับภาพลักษณะเดียวกับภาพ 4
-
-## P15 — Inpaint Coverage โดยไม่ลบภาพวาด
-
-1. สร้าง clean mask จาก union ของ glyph/text components ที่ยืนยันแล้วภายใน bubble region ไม่ใช้กล่อง translation แต่ละ candidate แยกกัน
-2. เพิ่ม padding ตามขนาดตัวอักษรและ anti-aliasing แต่ clamp ภายใน safe bubble mask
-3. ตรวจ residual dark text components หลัง inpaint ก่อน typeset
-4. ถ้ายังเหลือ source text เช่น `STONES?` ให้ทำ bounded mask expansion/re-inpaint ก่อนวาดคำแปล
-5. ห้ามขยายเป็น rectangle ใหญ่ทั้ง bubble/page โดยไม่มี mask เพราะเคยเกิดการลบภาพและกรอบใหญ่
-6. วาง Thai text ใน safe interior ของ bubble ไม่ใช้ union glyph box ที่แคบหรือเยื้องเป็น layout box โดยตรง
-
-Tests:
-
-- visual fixture ต้องไม่มี original English glyphs เหลือใน cleaned region
-- pixel ภายนอก bubble safe mask ต้องไม่เปลี่ยนเกิน tolerance
-- clean mask ต้องครอบทุก source line แต่ไม่รวม bubble outline/tail/artwork
-- หลัง typeset ต้องมี Thai text block เดียวต่อ region
-
-## P16 — Golden Fixtures และ Visual Regression
-
-1. ใช้ `img/1.PNG` และ `img/2.PNG` เป็น golden source fixtures แบบ exact transcript ไม่ใช่เพียงเช็คว่ามีคำ `VOICE`/`STONES`
-2. เก็บ expected region count, line order, selected source, union clean mask bounds และ semantic Thai assertions
-3. เพิ่มต้นฉบับของกรณีภาพ 3–4 เป็น fixtures ก่อน implementation; screenshot ผลลัพธ์อย่างเดียวไม่พอสำหรับ pixel-level test
-4. ทำ synthetic fixtures เพิ่ม:
-   - same bubble, two OCR candidates
-   - two adjacent bubbles, same text
-   - partial line + full line
-   - original English residual after undersized box
-5. สร้าง visual diff artifacts เฉพาะ test/debug และไม่เก็บ dialogue/image production ลง persistent logs
-
-## Acceptance Criteria ด้านคุณภาพ
-
-- `img/1.PNG`: region count = 3 และ selected source ตรงครบทั้งสาม clauses
-- `img/2.PNG`: region count = 1, `THIRTY-FIVE` = 2 ครั้ง, `STONES!` = 1 ครั้ง
-- semantic Thai ตรงตาม User-visible Translation Contract
-- selected source corruption tokens = 0
-- duplicate active regions/translation/render instructions = 0
-- translated text blocks ต่อ region = 1
-- residual English glyphs ใน cleaned region = 0 ตาม component/pixel threshold
-- artwork pixels นอก safe mask เปลี่ยนไม่เกิน tolerance
-- adjacent distinct bubbles ไม่ถูก merge
-- unresolved source/translation ถูก flag และไม่ publish แบบเงียบ
-- quality logic เพิ่มเวลา clean page ไม่เกิน 100ms และ recovery ยังอยู่ภายใต้ ROI pixel budget จากแผน Stage 1
-
-## ลำดับทำร่วมกับแผนเดิม
-
-1. เพิ่ม exact golden fixture contracts ใน P16 ก่อนแก้ OCR
-2. ทำ P10 region/candidate contracts และ P11 Source Quality Gate
-3. ทำ P1/P2 ROI-first recovery ร่วมกับ P12 candidate consensus
-4. ทำ P13 translation fidelity และเชื่อมกับ Stage 2 recovery state machine P6/P7
-5. ทำ P14 render uniqueness และ P15 mask coverage
-6. ทำ Stage 1/2/3 benchmark และ visual regression พร้อมกัน
-7. code review ต้องตรวจทั้ง correctness, performance, provider isolation และ pixel safety ก่อน rollout
+# แผนกู้คืนระบบแปลให้ครบ เร็ว คุณภาพดี และคุมค่า API
+
+## สถานะและขอบเขต
+
+เอกสารนี้เป็นแผนสำหรับ model ที่จะลงมือแก้ในรอบถัดไป ยังไม่อนุญาตให้เปลี่ยนโค้ดจากขั้นตอนวางแผนนี้
+
+เป้าหมายคือให้ทุก `region_id` ที่ระบบกรอบเดิมตรวจพบมีคำแปลไทยที่ผ่าน QC ก่อนเผยแพร่ โดยไม่ทิ้งภาษาอังกฤษ ไม่ปล่อยช่องว่าง ไม่วาดคำแปลซ้ำ ใช้ context ให้บทพูดเป็นธรรมชาติเหมือนคนแปล และทำงานภายในเวลา/ค่า API ที่ควบคุมได้
+
+## ข้อห้ามและ invariant ที่ต้องรักษา
+
+- ห้ามเปลี่ยน bubble detection, grouping, contour, bounding box, mask, reading order หรือขนาดกรอบ
+- ห้ามรวม แยก ลบ หรือสร้าง region ด้วย geometry, IoU หรือการซ้อนของกรอบเพื่อแก้ปัญหาคำแปลซ้ำ
+- ปัญหาคำแปลซ้ำต้องแก้ด้วย `region_id` และ translation state เท่านั้น
+- OCR recovery สำหรับอักษรเอียง/อ่านยาก อ่านใหม่ได้เฉพาะภายในกรอบและ `region_id` เดิม แล้วเปลี่ยนเฉพาะ `source_text`; ห้ามแก้พิกัดหรือเพิ่ม region
+- DeepSeek ต้องใช้ provider และ model ที่ผู้ใช้เลือกตลอดทั้ง primary/recovery ห้ามข้ามไป Groq หรือ DeepSeek model อื่น
+- Groq สลับ model ได้เฉพาะ model ภายใน Groq และห้ามข้ามไป DeepSeek
+- Stage 3 มีหน้าที่ inpaint, typeset และ upload เท่านั้น ห้ามเรียก AI
+- ผลที่ `APPROVED` แล้วห้ามถูกส่งไปแปลซ้ำหรือถูกผลที่แย่กว่าเขียนทับ
+
+## หลักฐานจากงานที่ล้มล่าสุด
+
+อ้างอิง job `a1853287-df72-4368-aaaf-4e910d98e1d2`:
+
+- Chapter 149 มี 20 หน้า และ 89 translation regions
+- Stage 2 ได้คำแปลที่ parser รับได้แล้ว 76 regions
+- ก่อนเข้า final QC ยังเหลือ 13 pending regions; Stage 3 ระบุ 12 IDs ที่ว่าง/ยังเป็น source อย่างชัดเจน (`9:1`, `9:2`, `10:1`–`10:5`, `14:2`–`14:4`, `15:8`, `15:9`) ส่วนอีกหนึ่งรายการต้องแยกจาก artifact ว่าเป็น quality rejection ใด ห้ามสรุปรวมแบบเดา
+- ระบบเพิ่ม `ocr-unverified:<page>` อีก 20 รายการเข้า list เดียวกัน จึงแสดง `33 dialogue regions remain unresolved` ทั้งที่ 20 รายการนั้นเป็น page-level diagnostic ไม่ใช่ช่องคำพูด
+- OCR log ระบุ `coverage_verified=false` เกือบทุกหน้า เพราะ component heuristic พบ dark component หรือ recovery semaphore เต็ม แม้ primary OCR จะคืน regions ได้แล้ว
+- Batch 2 ได้ 17 translations และขาด 7 IDs; Batch 3 ได้ 10 translations และขาด 18 IDs
+- DeepSeek ตอบ HTTP 200 หลายครั้ง แต่ parser ไม่พบ translation ที่รับได้แล้วโยน generic `RuntimeError("DeepSeek batch result is incomplete")`
+- recovery ส่ง request ต่อหลัง contract failure โดยไม่มีข้อมูลชัดว่า response ว่าง, JSON เสีย, truncated, ID ผิด หรือ output token ไม่พอ
+- Stage 2 ใช้ 141.95 วินาที แต่ยังจบด้วย 13 missing translations
+- UI แสดง `approval_retry_budget_exhausted` แม้ log ไม่ได้พิสูจน์ว่า dollar budget หมดจริง
+- process runner log ว่า job “completed successfully” แม้ job status เป็น `FAILED`
+
+## สาเหตุหลักที่ต้องแก้
+
+1. Page-level OCR warning ถูกนับรวมกับ translation failure ทำให้หน้าที่เคยแปลได้ถูก block ทั้งบท
+2. DeepSeek HTTP 200 contract failures ถูกยุบเป็น `RuntimeError` เดียว จึงเลือก recovery strategy ไม่ถูก
+3. fixed recovery output 800 tokens และกลุ่ม recovery ที่ใหญ่สามารถทำให้ JSON ขาดหรือไม่มีรายการที่ parser ยอมรับ
+4. retry ทำซ้ำโดยไม่ adaptive split และไม่ส่ง draft/issue codes ไปให้โมเดลซ่อมเฉพาะจุด
+5. quality gate ยังไม่มี severity ที่แยก hard correctness failure ออกจาก soft semantic/style review
+6. state ของ translation กระจายหลาย branch ทำให้การนับ attempt, missing IDs, approved IDs และสาเหตุสุดท้ายคลุมเครือ
+7. สถานะ backend, runner log และ UI ไม่ใช้ failure taxonomy เดียวกัน
+
+## P0 — หยุด regression และคืนความหมายของสถานะให้ถูกต้อง
+
+1. สร้าง snapshot regression จาก baseline กรอบเดิมสำหรับ Chapter 149 และ fixtures ใน `img/`:
+   - `region_id`
+   - จำนวน regions ต่อหน้า
+   - box coordinates
+   - reading order
+2. ทุก test และ implementation ในแผนนี้ต้องผ่าน snapshot แบบ exact; หากกรอบเปลี่ยนให้ถือว่า regression และหยุดงาน
+3. แยกสถานะออกเป็นคนละชุด ห้ามนับรวม:
+   - `missing_translation_ids`
+   - `quality_rejected_ids`
+   - `ocr_source_review_region_ids`
+   - `ocr_diagnostic_pages`
+   - `response_contract_errors`
+4. `coverage_verified=false` จาก heuristic ต้องเป็น diagnostic จนกว่าจะมีหลักฐานตำแหน่งข้อความที่ตกหล่นจริง:
+   - ห้ามแปลง page warning เป็น dialogue ID
+   - ห้ามใช้ warning นี้แก้/ลบ/รวมกรอบ
+   - hard block ได้เฉพาะเมื่อ audit ระบุ region หรือ crop ที่มี source text ตกหล่นจริง
+5. แก้ runner ให้ log และคืนผลตาม terminal status จริง: `COMPLETED`, `FAILED`, `PAUSED_COST_LIMIT`, `CANCELLED`
+6. UI ต้องแสดงสาเหตุจริง ห้ามแนะนำว่าเข้าถึงเว็บต้นฉบับไม่ได้เมื่อปัญหาอยู่ที่ translation/QC
+
+## P1 — เปลี่ยน generic RuntimeError เป็นผลลัพธ์ที่กู้คืนได้
+
+สร้าง structured batch outcome ที่คืน valid partial results เสมอ:
+
+- `COMPLETE`
+- `PARTIAL`
+- `EMPTY_CONTENT`
+- `INVALID_JSON`
+- `TRUNCATED_JSON`
+- `MISSING_IDS`
+- `DUPLICATE_IDS`
+- `UNKNOWN_IDS`
+- `TRANSPORT_RETRYABLE`
+- `TRANSPORT_PERMANENT`
+
+ข้อกำหนด:
+
+1. HTTP 200 ที่ response contract ผิดห้ามโยน generic `RuntimeError` และทำข้อมูลสาเหตุหาย
+2. parser ต้องเก็บทุก valid expected ID แม้ JSON ส่วนท้ายขาด
+3. บันทึกเฉพาะ metadata ที่ปลอดภัย: outcome, response byte count, finish reason, expected/parsed/missing counts, token usage และ latency; ห้าม log dialogue/API key/raw response
+4. ใช้ response schema เดียวทุก call คือ `segment_id` และ `translation`; alias เก่ารองรับเฉพาะที่ประกาศชัดเจน
+5. 429/5xx/timeout ใช้ bounded backoff และ `Retry-After`
+6. HTTP 200 contract failure ห้ามส่ง payload เดิมซ้ำแบบ blind retry; ต้อง adaptive split ทันที
+7. 401/403/invalid request หยุดทันทีด้วยสาเหตุถาวร ไม่เสีย retry budget
+
+## P2 — สร้าง translation ledger หนึ่ง state ต่อหนึ่ง region
+
+ใช้ immutable map keyed by `region_id` โดยมีข้อมูลอย่างน้อย:
+
+- `segment_id`
+- `source_text` และ source verification state
+- `active_translation`
+- `state`: `PENDING | DRAFT | REPAIR_PENDING | APPROVED | PAUSED | FAILED`
+- `issue_codes` แยก hard/soft
+- `attempt_count`
+- `request_fingerprints`
+- `provider` และ `model`
+- input/output tokens, cost และ latency
+
+กติกา:
+
+1. หนึ่ง region มี active translation ได้เพียงหนึ่งค่า
+2. recovery ต้อง replace candidate ใน state เดิม ห้าม append translation/render item
+3. response ที่มี ID ซ้ำ apply ได้ครั้งเดียว และต้องไม่สร้าง overlay ซ้ำ
+4. region ที่ approved แล้วไม่เข้า retry queue อีก
+5. candidate ใหม่แทน candidate เดิมได้เมื่อผ่าน QC หรือมี hard issue น้อยลงโดยไม่ทำ correctness ที่เคยผ่านให้เสีย
+6. render instruction สร้างจาก approved ledger หนึ่งรายการต่อ `region_id`
+7. ห้ามใช้ตำแหน่งหรือ overlap ของกรอบเป็นตัวตัดสิน duplicate translation
+8. checkpoint ledger หลัง primary batch และ recovery wave เพื่อ resume เฉพาะ unresolved IDs ได้
+
+## P3 — Quality Gate ที่รักษาคุณภาพโดยไม่ปัดคำแปลดีทิ้ง
+
+### Hard blockers
+
+- ค่าว่างหรือเหมือน source
+- English leakage ที่ไม่อยู่ allowlist ชื่อเฉพาะ/ศัพท์ระบบ
+- meta text หรือคำอธิบายจากโมเดล
+- missing/duplicate/unknown segment ID
+- clause สำคัญหรือคำปฏิเสธหาย
+- ตัวเลข จำนวน ระดับพลัง หรือหน่วยผิด หลัง normalize เลขอารบิก เลขไทย และคำอ่านเลข
+- locked glossary ผิด
+- เพศ/สรรพนามผิดเมื่อ character evidence ยืนยันได้
+- JSON/response contract ใช้งานไม่ได้
+
+### Soft review
+
+- length ratio โดยไม่มีหลักฐานว่าความหมายหาย
+- ประโยคยาว
+- stylistic preference
+- คำกำกวม
+- semantic-risk keyword เพียงอย่างเดียว
+
+กติกา:
+
+1. soft issue ห้ามทำให้งานล้มทันที
+2. ส่ง semantic repair เฉพาะ region ที่มี soft issue โดยแนบ source, draft, issue, glossary, character/gender context และบทก่อนหน้า/ถัดไป
+3. repair prompt ต้องสั่ง “แก้ draft” ไม่ใช่เริ่มแปลใหม่โดยไม่รู้ข้อผิดพลาด
+4. คำแปลสุดท้ายต้องรักษาทุก clause, negation, number, rank, name และ relationship
+5. ภาษาไทยต้องเป็นธรรมชาติ กระชับตามพื้นที่ bubble และคงน้ำเสียงตัวละคร
+6. สร้าง issue histogram จาก Chapter 149 เพื่อปรับ threshold ด้วยข้อมูลจริงก่อนเปิด hard gate ใหม่
+
+## P4 — Adaptive DeepSeek recovery ที่ครบและไม่เกิด retry storm
+
+1. Primary batch คง reading order และ context ต่อเนื่อง สูงสุด 5 หน้า แต่ต้องมี segment/output-token budget เพิ่มเติม
+2. benchmark primary segment caps `16`, `24`, `32` เทียบกับค่าปัจจุบัน; เลือกค่าที่ completeness สูงสุดก่อน latency
+3. recovery split ตามลำดับ `8 → 4 → 2 → 1` เมื่อเกิด empty/invalid/truncated/missing contract outcome
+4. คำนวณ `max_output_tokens` ตามจำนวน segment และความยาว source แทน fixed 800 โดยมี hard cap ต่อ request
+5. payload fingerprint เดิมส่งซ้ำได้ไม่เกิน 2 ครั้ง และใช้ซ้ำเฉพาะ transport failure
+6. valid partial translations ต้อง commit ทันที แล้ว retry เฉพาะ IDs ที่เหลือ
+7. recovery คนละ chunk ทำพร้อมกันแบบ bounded concurrency; เริ่ม benchmark Flash ที่ concurrency 2 และ 3
+8. หลัง contract fail ห้าม sleep แบบ backoff; split แล้วทำต่อทันที ส่วน backoff ใช้เฉพาะ network/429/5xx
+9. single-ID recovery ใช้ prompt/response สั้น พร้อม context เท่าที่จำเป็น
+10. Stage 2 ต้องจบด้วย ledger ที่ทุก region เป็น `APPROVED` หรือ terminal reason ที่เจาะจง; Stage 3 ห้ามกู้คำแปล
+11. DeepSeek ทุก call ตรวจ assertion ว่า provider/model ตรงกับ job เดิม
+12. Groq recovery แยก implementation/config และสลับได้เฉพาะ Groq models
+
+## P5 — Source OCR ยากโดยไม่แตะกรอบ
+
+1. ใช้ region/box pipeline เดิมเป็น expected set
+2. หาก source quality สงสัย ให้ crop ภายใน box เดิมและทำ OCR candidate ensemble แบบ bounded
+3. recovery เปลี่ยนเฉพาะ source candidate ของ region เดิม; region ID, box และ reading order ต้องคงเดิม
+4. เลือก source ด้วย visual consensus, confidence, punctuation/clause completeness และ glossary evidence
+5. กรณีอักษรเอียงต้องมี fixtures exact transcript สำหรับ `VOICE`, `LU SHU`, `IS HE`, `THIRTY-FIVE` สองตำแหน่ง และ `STONES`
+6. หากยังอ่าน source ไม่ได้ ให้สถานะ `SOURCE_REVIEW_REQUIRED` พร้อม region/page จริง ห้ามปลอมเป็น translation failure
+7. detector coverage ใหม่ต้องทำ shadow mode จน false-positive rate ผ่านเกณฑ์ จึงค่อยมีสิทธิ์ hard block publication
+
+## P6 — Completeness และ atomic publication
+
+งานที่รายงานว่าสำเร็จต้องผ่านทั้งหมด:
+
+- expected stable region IDs = approved region IDs
+- missing translations = 0
+- hard quality failures = 0
+- empty Thai = 0
+- English leakage = 0
+- duplicate active translations = 0
+- render instructions ต่อ region = 1
+- provider/model crossover = 0
+
+หากยังไม่ครบ:
+
+1. ห้าม upload/replace chapter แบบ partial
+2. เก็บ checkpoint และ resume เฉพาะ unresolved regions
+3. UI แสดงจำนวนและสาเหตุแยกตาม translation, source OCR, provider transport และ cost limit
+4. ห้ามลบ valid/approved results และห้ามเริ่มแปลทั้งตอนใหม่
+5. สถานะ “สำเร็จ” ใช้ได้เฉพาะหลัง atomic publication สำเร็จจริง
+
+## P7 — Cost control สำหรับ API เสียเงิน
+
+1. แยกค่าใช้จ่าย primary, contract recovery และ semantic repair
+2. ทุก paid request ต้อง reserve conservative upper bound ก่อนส่ง และ settle ด้วย actual usage หลังตอบ
+3. already-approved region มีต้นทุนเพิ่มเป็นศูนย์
+4. ใช้ configurable per-provider chapter cap; ค่าเริ่มต้นทดลองสำหรับ Flash recovery ไม่เกิน `$0.05` ต่อบท แล้วลดจากข้อมูลจริง
+5. Pro ต้องมี cap แยกจาก Flash เพราะราคาไม่เท่ากัน
+6. call-count cap เป็น safety circuit ไม่ใช่ error message เริ่มต้น; รายงาน `CALL_LIMIT` หรือ `COST_LIMIT` เฉพาะเมื่อชนจริง
+7. เมื่อชน cost cap ให้ `PAUSED_COST_LIMIT` พร้อม checkpoint ไม่ใช่ลบงานหรือกล่าวว่า translation error
+8. unit/integration/replay tests ห้ามเรียก paid API
+9. paid canary ใช้ Chapter 149 หนึ่งรอบหลัง offline tests ผ่าน โดยต้องมี hard cost cap และผู้ใช้เปิดใช้งานอย่างชัดเจน
+10. dashboard/log แสดง cost ต่อ request, ต่อ approved region, primary/recovery ratio และจำนวน request ที่หลีกเลี่ยงจากการไม่ resend
+
+## P8 — Performance targets
+
+เป้าหมายสำหรับ Chapter 149 หลัง warm-up:
+
+- Stage 2 primary + recovery median ไม่เกิน 75 วินาที
+- Stage 2 hard target ไม่เกิน 100 วินาทีเมื่อไม่มี provider incident
+- total chapter median ไม่เกิน 120 วินาทีเมื่อ Stage 1/3 อยู่ใน budget
+- repeated identical paid request หลัง contract failure = 0
+- recovery request ต้องมี unresolved IDs เท่านั้น
+- approved region resend = 0
+- Stage 3 AI calls = 0
+- UI polling/logging ต้องไม่เพิ่มงาน AI หรือทำให้ UI กระพริบ
+
+การเลือกค่า batch/concurrency ต้องใช้ benchmark completeness, p50/p95 latency, token cost และ contract failure rateร่วมกัน ห้ามเลือกจากความเร็วอย่างเดียว
+
+## P9 — TDD และ verification ก่อน implementation ถือว่าเสร็จ
+
+เขียน test ก่อนแก้โค้ด:
+
+1. Replay รูปแบบงานจริง 89 regions:
+   - primary ได้ 76
+   - missing จริง 13
+   - page diagnostics 20 ต้องไม่ถูกนับเป็น dialogue failure
+2. Replay batch partial `17 + 7 missing` และ `10 + 18 missing`
+3. HTTP 200 + empty/malformed/truncated JSON ต้องคืน typed outcome ไม่ใช่ generic RuntimeError
+4. valid partial results ต้องไม่หายเมื่อ response ส่วนท้ายเสีย
+5. adaptive split ต้องลงถึง single ID และจบครบโดยไม่ resend approved IDs
+6. quality fixtures สำหรับ clause, negation, number/rank, glossary, gender และ English leakage
+7. soft length/style issue ต้องไม่ทำให้คำแปลที่ถูกต้องถูกทิ้ง
+8. duplicate response/repair ของ region เดิมต้องมี active translation และ render instruction เดียว
+9. snapshot region IDs, boxes และ reading order ก่อน/หลังต้องตรง 100%
+10. DeepSeek primary/recovery ทุก call ใช้ provider/model เดิม
+11. Groq model switching อยู่ภายใน Groq เท่านั้น
+12. cost reservation, call cap, timeout, pause และ resume ทำงานจริง
+13. runner/UI terminal status ต้องตรงกับ repository job status
+14. full backend tests, integration tests และ touched-code coverage อย่างน้อย 80%
+15. visual regression ต้องไม่มี source English ค้าง ไม่มีช่องว่าง และไม่มี Thai overlay ซ้ำ
+
+## ลำดับ implementation สำหรับ model ตัวเล็ก
+
+1. ทำ P0 tests และ snapshot กรอบก่อนแตะ production code
+2. ทำ typed outcomes/parser ใน P1 พร้อม replay fixtures
+3. ทำ region ledger P2 และย้ายการนับ/attempt/state มาไว้จุดเดียว
+4. แยก hard/soft QC ตาม P3
+5. ทำ adaptive recovery P4 และ provider assertions
+6. ทำ source recovery ภายในกรอบเดิมตาม P5 โดยห้ามเปลี่ยน geometry
+7. ทำ atomic publish/checkpoint/cost states ตาม P6–P7
+8. ปรับ performance ด้วย benchmark P8 หลัง correctness ผ่านเท่านั้น
+9. รัน P9 ทั้งหมด ทำ code review และแก้ P0/P1 findings ก่อน rollout
+10. เปิด feature flag ใน shadow/replay → local mock E2E → paid canary 1 บท → rollout ทีละขั้น พร้อม rollback switch
+
+## เกณฑ์เสร็จสมบูรณ์
+
+- Chapter 149 แปลครบทุก stable region ที่กรอบเดิมตรวจพบ
+- ไม่มีอังกฤษ ไม่มีช่องว่าง และไม่มีคำแปลซ้ำ
+- จำนวน region, `region_id`, พิกัด box และ reading order ไม่เปลี่ยนจาก baseline
+- ไม่มี generic RuntimeError หลัง HTTP 200
+- ไม่มี payload เดิมวนซ้ำหลัง contract failure
+- DeepSeek ไม่ข้าม provider/model และ Groq ไม่ข้าม provider
+- คำแปลผ่าน fixtures ด้าน clause, number, rank, negation, glossary, gender และความเป็นธรรมชาติ
+- เวลาและค่าใช้จ่ายอยู่ใน budget พร้อมตัวเลขแยก primary/recovery
+- job/UI แสดง terminal state และสาเหตุจริง
+- regression suite ผ่านทั้งหมดและ code review ไม่มี P0/P1
 
 ## Non-goals
 
+- ไม่แก้ bubble detection, grouping, contour, box, mask หรือ reading order
+- ไม่ใช้ geometry แก้คำแปลซ้ำ
 - ไม่ hardcode ประโยค Chapter 149 ลง production
-- ไม่ใช้ AI translation เดาแก้ OCR source โดยไม่มี visual evidence
-- ไม่ merge bubble เพียงเพราะข้อความเหมือนกัน
-- ไม่เพิ่ม full-page OCR variants จน performance ถอยอีก
-- ไม่ยอมให้ typesetter วาดต่อเมื่อ preflight พบ duplicate/collision
+- ไม่ใช้ AI แปลเพื่อเดา source OCR โดยไม่มี visual evidence
+- ไม่เรียก paid API ระหว่าง unit/integration tests
+- คำว่า “ครบ 100%” ใน acceptance หมายถึงทุก stable region ที่ระบบกรอบเดิมตรวจพบ; ข้อความที่ระบบไม่เคยตรวจพบต้องถูก coverage audit รายงานแยกอย่างตรงไปตรงมา ไม่ปลอมว่าเป็น translation ID

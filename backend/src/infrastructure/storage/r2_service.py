@@ -38,6 +38,7 @@ class R2StorageService:
         import time
         safe_slug = self._safe_key_component(manga_slug)
         safe_chapter = self._safe_key_component(chapter_number)
+        safe_run_id = self._safe_key_component(run_id) if run_id else None
         key = f"{safe_slug}/{safe_chapter}/{page_index}.jpg"
         
         def _put():

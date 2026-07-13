@@ -418,3 +418,60 @@ async def test_worker_upload_failure_keeps_existing_reader_pages_untouched(test_
     assert [(page.page_index, page.image_url) for page in pages] == [
         (1, "https://cdn.test/published/1.jpg")
     ]
+
+
+@pytest.mark.asyncio
+async def test_worker_publishes_chapter_with_warnings_when_some_dialogue_approved(test_session):
+    """When a chapter has approved dialogue translations, minor unresolved regions should not block publication."""
+    from src.domains.jobs.repository import JobRepository
+    from src.pipeline.worker import TranslationPipelineWorker
+
+    job = await JobRepository(test_session).create(
+        {"source_url": "https://example.test/source-resilience", "status": "PENDING", "progress_percent": 0}
+    )
+    image_bytes = _jpeg_bytes()
+    scraper = AsyncMock()
+    scraper.fetch_chapter_data.return_value = {
+        "series_slug": "resilience-series",
+        "series_title": "Resilience Series",
+        "chapter_number": "100",
+        "next_chapter_url": None,
+        "prev_chapter_url": None,
+        "pages": [
+            {"index": 1, "image_bytes": image_bytes, "raw_url": "https://example.test/1.jpg"},
+            {"index": 2, "image_bytes": image_bytes, "raw_url": "https://example.test/2.jpg"},
+        ],
+    }
+    ocr = AsyncMock()
+    ocr.detect_and_extract.side_effect = [
+        [_segment(1, 1, "Hello world"), _segment(2, 1, "SFX Boom")],
+        [_segment(3, 2, "Good morning")],
+    ]
+    r2 = AsyncMock()
+    r2.upload_image.side_effect = ["https://cdn.test/1.jpg", "https://cdn.test/2.jpg"]
+
+    from src.pipeline.quality import QualityAssessment
+
+    class _PartialSuccessQualityGate:
+        def evaluate(self, segment, translation, glossary):
+            if "SFX" in segment.source_text:
+                return QualityAssessment(passed=False, issue_codes=("EMPTY_TRANSLATION",), requires_semantic_review=False)
+            return QualityAssessment(passed=True, issue_codes=(), requires_semantic_review=False)
+
+    worker = TranslationPipelineWorker(
+        session=test_session,
+        scraper=scraper,
+        ocr=ocr,
+        translator=_RecordingTranslator(),
+        inpainter=MagicMock(return_value=image_bytes),
+        typesetter=MagicMock(return_value=image_bytes),
+        r2_service=r2,
+        quality_gate=_PartialSuccessQualityGate(),
+        profile={"genre": "neutral"},
+        glossary=(),
+    )
+
+    completed = await worker.process_job(job.id)
+
+    assert completed.status == "COMPLETED_WITH_WARNINGS"
+    assert r2.upload_image.await_count == 2

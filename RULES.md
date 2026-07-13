@@ -179,6 +179,7 @@ tests/           — Test suite
 - Prefer immutable updates over mutating shared state.
 - Follow established repository patterns before inventing new ones.
 - Keep contributions focused, reviewable, and well-described.
+- Always use forward slashes ('/') or standard command names (e.g., 'pytest', 'python -m pytest', '.venv/Scripts/pytest.exe') when running terminal commands on Windows so permission matching works correctly without backslash regex escape bugs.
 - เซฟประวัติการแก้ไขไว้ใน CHANGELOG.md เสมอ
 - ก่อนเริ่มงานใหม่หากมีการ plan งานใหม่ให้ทำ project plan อัพเดทลงใน PROJECT_PLAN.md ก่อนเสมอ
 
@@ -188,6 +189,7 @@ tests/           — Test suite
 - Bypass security checks or validation hooks.
 - Duplicate existing functionality without a clear reason.
 - Ship code without checking the relevant test suite.
+- Execute commands with Windows backslash paths like '.venv\Scripts\pytest.exe' or 'backend\.venv\Scripts\python.exe' because backslashes break the permission grant regex matcher and force interactive user prompts every round.
 
 ## Agent Format
 - Agents live in `agents/*.md`.

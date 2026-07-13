@@ -425,21 +425,24 @@ class MangaOCREngine:
                     if recovery_semaphore is not None and not recovery_semaphore.acquire(blocking=False):
                         recovery_skipped_reason = "recovery_concurrency_saturated"
                         continue
-                    upscaled = cv2.resize(crop, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
-                    shear = -0.12
-                    x_offset = max(0, int(np.ceil(-shear * upscaled.shape[0])))
-                    width = upscaled.shape[1] + int(np.ceil(abs(shear) * upscaled.shape[0]))
-                    matrix = np.float32([[1, shear, x_offset], [0, 1, 0]])
-                    variant = cv2.warpAffine(upscaled, matrix, (width, upscaled.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
                     try:
-                        variant_response = self.ocr_engine(variant)
-                        roi_passes += 1
-                        roi_pixels += recovery_pixels
+                        upscaled = cv2.resize(crop, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+                        variant_results = []
+                        for shear in (-0.20, -0.12, 0.12):
+                            x_offset = max(0, int(np.ceil(-shear * upscaled.shape[0])))
+                            width = upscaled.shape[1] + int(np.ceil(abs(shear) * upscaled.shape[0]))
+                            matrix = np.float32([[1, shear, x_offset], [0, 1, 0]])
+                            variant = cv2.warpAffine(upscaled, matrix, (width, upscaled.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+                            variant_response = self.ocr_engine(variant)
+                            roi_passes += 1
+                            roi_pixels += recovery_pixels
+                            res_list = variant_response[0] if isinstance(variant_response, tuple) else variant_response
+                            for item in res_list or []:
+                                variant_results.append((item, shear, x_offset))
                     finally:
                         if recovery_semaphore is not None:
                             recovery_semaphore.release()
-                    variant_result = variant_response[0] if isinstance(variant_response, tuple) else variant_response
-                    for item in variant_result or []:
+                    for item, shear, x_offset in variant_results:
                         polygon, raw_text, raw_confidence = item[0], str(item[1]).strip(), float(item[2])
                         if raw_confidence < 0.4 or len(raw_text) < 2:
                             continue

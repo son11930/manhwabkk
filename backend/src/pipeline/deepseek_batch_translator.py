@@ -28,6 +28,16 @@ class DeepSeekBatchParseOutcome:
     unknown_ids: Tuple[str, ...]
     parse_error: Optional[str] = None
 
+    @property
+    def outcome_type(self) -> str:
+        if self.parse_error:
+            return "INVALID_JSON"
+        if not self.translations and len(self.missing_ids) > 0:
+            return "EMPTY_CONTENT"
+        if len(self.missing_ids) == 0:
+            return "COMPLETE"
+        return "PARTIAL"
+
 
 def _response_entries(response_text: str) -> tuple[List[Any], Optional[str]]:
     """Return complete translation entries even when a response ends mid-JSON."""
@@ -222,8 +232,6 @@ class DeepSeekBatchTranslator:
             max_tokens=max_output_tokens,
         )
         parse_outcome = parse_deepseek_batch_response(result.text, expected_ids)
-        if not parse_outcome.translations:
-            raise RuntimeError("DeepSeek batch result is incomplete")
         return BatchTranslationResult(
             translations=parse_outcome.translations,
             model=result.model,

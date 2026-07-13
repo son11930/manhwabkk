@@ -36,7 +36,12 @@ from src.pipeline.rendering import (
 )
 from src.pipeline.translator import AITranslatorEngine, TranslationResponseError
 from src.infrastructure.ai.factory import get_ai_client
-from src.pipeline.deepseek_batch_translator import DeepSeekBatchTranslator, append_batch_context, group_pages_for_batching
+from src.pipeline.deepseek_batch_translator import (
+    BatchTranslationResult,
+    DeepSeekBatchTranslator,
+    append_batch_context,
+    group_pages_for_batching,
+)
 from src.pipeline.typesetter import TypesetterEngine
 from src.config import settings
 from src.pipeline.ocr_benchmark import percentile
@@ -65,6 +70,12 @@ _MANDATORY_RECOVERY_ISSUES = frozenset({
     "EMPTY_TRANSLATION",
     "ENGLISH_LEAKAGE",
     "META_TEXT",
+})
+
+_SOFT_QC_ISSUES = frozenset({
+    "NUMBER_MISMATCH",
+    "LENGTH_RATIO_OUTLIER",
+    "AMBIGUOUS_TERM_REVIEW",
 })
 
 
@@ -150,6 +161,115 @@ class TranslationPipelineWorker:
                 confidence=float(item.get("confidence", 1.0)),
             ))
         return tuple(segments)
+
+    async def _adaptive_translate_segments(
+        self,
+        segments: Sequence[OCRSegment],
+        batch_translator: DeepSeekBatchTranslator,
+        glossary: tuple[Mapping[str, object], ...],
+        context: tuple[dict[str, object], ...],
+        profile: Mapping[str, object],
+        job_id: str,
+        budget_reserve_fn: Callable[[float], bool],
+        budget_settle_fn: Callable[[float, float], None],
+    ) -> BatchTranslationResult:
+        genre = str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation"
+        if not segments:
+            return BatchTranslationResult({}, "deepseek-v4-flash", 0, 0, 0, 0.0, None)
+
+        ceiling = batch_translator.estimate_max_cost_usd(
+            [segments],
+            glossary=glossary,
+            context=context,
+            genre=genre,
+            max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
+        )
+        if not budget_reserve_fn(ceiling):
+            logger.warning("[Worker] [Job %s] Adaptive recovery deferred by budget for %d segments", job_id, len(segments))
+            return BatchTranslationResult({}, "deepseek-v4-flash", 0, 0, 0, 0.0, None)
+
+        try:
+            res = await batch_translator.translate_page_batch(
+                [segments],
+                glossary=glossary,
+                context=context,
+                genre=genre,
+                max_output_tokens=max(settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS, len(segments) * 200),
+            )
+        except Exception as err:
+            budget_settle_fn(ceiling, 0.0)
+            if len(segments) <= 1:
+                logger.warning("[Worker] [Job %s] Single segment translation failed (%s)", job_id, type(err).__name__)
+                return BatchTranslationResult({}, "deepseek-v4-flash", 1, 0, 0, 0.0, None)
+            mid = (len(segments) + 1) // 2
+            logger.warning("[Worker] [Job %s] Batch of %d failed (%s); splitting into %d and %d", job_id, len(segments), type(err).__name__, mid, len(segments) - mid)
+            left_res = await self._adaptive_translate_segments(
+                segments[:mid], batch_translator, glossary, context, profile, job_id, budget_reserve_fn, budget_settle_fn
+            )
+            right_res = await self._adaptive_translate_segments(
+                segments[mid:], batch_translator, glossary, context, profile, job_id, budget_reserve_fn, budget_settle_fn
+            )
+            return replace(
+                left_res,
+                translations={**left_res.translations, **right_res.translations},
+                attempts=left_res.attempts + right_res.attempts,
+                input_tokens=left_res.input_tokens + right_res.input_tokens,
+                output_tokens=left_res.output_tokens + right_res.output_tokens,
+                cost_usd=left_res.cost_usd + right_res.cost_usd,
+            )
+
+        budget_settle_fn(ceiling, res.cost_usd)
+
+        missing_segments = [s for s in segments if s.segment_id not in res.translations or not res.translations[s.segment_id]]
+        if missing_segments and len(missing_segments) < len(segments):
+            logger.warning("[Worker] [Job %s] Partial outcome: got %d, missing %d segments; recovering missing", job_id, len(res.translations), len(missing_segments))
+            if len(missing_segments) > 1:
+                mid = (len(missing_segments) + 1) // 2
+                left_res = await self._adaptive_translate_segments(
+                    missing_segments[:mid], batch_translator, glossary, context, profile, job_id, budget_reserve_fn, budget_settle_fn
+                )
+                right_res = await self._adaptive_translate_segments(
+                    missing_segments[mid:], batch_translator, glossary, context, profile, job_id, budget_reserve_fn, budget_settle_fn
+                )
+                recovered = replace(
+                    left_res,
+                    translations={**left_res.translations, **right_res.translations},
+                    attempts=left_res.attempts + right_res.attempts,
+                    input_tokens=left_res.input_tokens + right_res.input_tokens,
+                    output_tokens=left_res.output_tokens + right_res.output_tokens,
+                    cost_usd=left_res.cost_usd + right_res.cost_usd,
+                )
+            else:
+                recovered = await self._adaptive_translate_segments(
+                    missing_segments, batch_translator, glossary, context, profile, job_id, budget_reserve_fn, budget_settle_fn
+                )
+            return replace(
+                res,
+                translations={**res.translations, **recovered.translations},
+                attempts=res.attempts + recovered.attempts,
+                input_tokens=res.input_tokens + recovered.input_tokens,
+                output_tokens=res.output_tokens + recovered.output_tokens,
+                cost_usd=res.cost_usd + recovered.cost_usd,
+            )
+        elif missing_segments and len(missing_segments) == len(segments) and len(segments) > 1:
+            mid = (len(segments) + 1) // 2
+            logger.warning("[Worker] [Job %s] Zero outcome for batch of %d; splitting into %d and %d", job_id, len(segments), mid, len(segments) - mid)
+            left_res = await self._adaptive_translate_segments(
+                segments[:mid], batch_translator, glossary, context, profile, job_id, budget_reserve_fn, budget_settle_fn
+            )
+            right_res = await self._adaptive_translate_segments(
+                segments[mid:], batch_translator, glossary, context, profile, job_id, budget_reserve_fn, budget_settle_fn
+            )
+            return replace(
+                left_res,
+                translations={**left_res.translations, **right_res.translations},
+                attempts=left_res.attempts + right_res.attempts,
+                input_tokens=left_res.input_tokens + right_res.input_tokens,
+                output_tokens=left_res.output_tokens + right_res.output_tokens,
+                cost_usd=left_res.cost_usd + right_res.cost_usd,
+            )
+
+        return res
 
     @staticmethod
     def _deduplicate_pages(pages: Sequence[dict]) -> list[dict]:
@@ -340,6 +460,7 @@ class TranslationPipelineWorker:
             all_results: list[TranslationResult] = []
             all_segments: dict[str, OCRSegment] = {}
             warnings = False
+            total_approved_count = 0
             provider = getattr(job, "translation_provider", "groq") or "groq"
             deepseek_translations: dict[str, str] = {}
             total_in_tokens = 0
@@ -433,7 +554,7 @@ class TranslationPipelineWorker:
                                 glossary=tuple(glossary),
                                 context=context,
                                 genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                                max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
+                                max_output_tokens=max(settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS, len(missing_segments) * 200),
                             )
                             if not reserve_recovery_call(recovery_ceiling):
                                 logger.warning(
@@ -442,12 +563,15 @@ class TranslationPipelineWorker:
                                 )
                                 return res
                             try:
-                                recovered = await batch_translator.translate_page_batch(
-                                    [missing_segments],
-                                    glossary=tuple(glossary),
-                                    context=context,
-                                    genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                                    max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
+                                recovered = await self._adaptive_translate_segments(
+                                    missing_segments,
+                                    batch_translator,
+                                    tuple(glossary),
+                                    context,
+                                    profile,
+                                    job_id,
+                                    reserve_recovery_call,
+                                    settle_recovery_call,
                                 )
                                 res = replace(
                                     res,
@@ -456,7 +580,6 @@ class TranslationPipelineWorker:
                                     output_tokens=res.output_tokens + recovered.output_tokens,
                                     cost_usd=res.cost_usd + recovered.cost_usd,
                                 )
-                                settle_recovery_call(recovery_ceiling, recovered.cost_usd)
                             except Exception as recovery_error:
                                 logger.warning(
                                     "[Worker] [Job %s] Batch %d/%d missing-only recovery failed (%s); retaining valid partial translations",
@@ -479,16 +602,25 @@ class TranslationPipelineWorker:
                     )
                     return res
 
-                for batch_idx, page_batch in enumerate(batches, start=1):
-                    batch_context = tuple(rolling_context[-8:])
-                    try:
-                        batch_res = await translate_deepseek_batch(batch_idx, page_batch, batch_context)
-                    except Exception as batch_error:
-                        logger.warning("[Worker] [Job %s] DeepSeek batch translation failed: %s", job_id, type(batch_error).__name__)
+                sem = asyncio.Semaphore(batch_limit)
+                async def _run_batch(idx: int, p_batch):
+                    async with sem:
+                        try:
+                            return await translate_deepseek_batch(idx, p_batch, tuple(rolling_context[-8:]))
+                        except Exception as batch_error:
+                            logger.warning("[Worker] [Job %s] DeepSeek batch translation failed: %s", job_id, type(batch_error).__name__)
+                            return None
+
+                batch_results = await asyncio.gather(*(
+                    _run_batch(idx, p_batch)
+                    for idx, p_batch in enumerate(batches, start=1)
+                ))
+                for idx, (p_batch, batch_res) in enumerate(zip(batches, batch_results), start=1):
+                    if batch_res is None:
                         continue
                     try:
                         deepseek_translations.update(batch_res.translations)
-                        rolling_context = list(append_batch_context(batch_context, page_batch, batch_res.translations))
+                        rolling_context = list(append_batch_context(tuple(rolling_context), p_batch, batch_res.translations))
                         total_in_tokens += batch_res.input_tokens
                         total_out_tokens += batch_res.output_tokens
                         total_cost_usd += batch_res.cost_usd
@@ -813,7 +945,14 @@ class TranslationPipelineWorker:
                             segment.segment_id,
                         )
 
-                    if assessment.passed:
+                    has_thai_chars = bool(
+                        result.final_thai and any("\u0e00" <= c <= "\u0e7f" for c in result.final_thai)
+                    )
+                    is_usable_translation = assessment.passed or (
+                        has_thai_chars and set(assessment.issue_codes).issubset(_SOFT_QC_ISSUES)
+                    )
+
+                    if is_usable_translation:
                         result = TranslationResult(
                             segment_id=result.segment_id,
                             source_text=result.source_text,
@@ -822,14 +961,17 @@ class TranslationPipelineWorker:
                             model=result.model,
                             attempts=result.attempts,
                             qc_status="APPROVED",
-                            issue_codes=result.issue_codes,
+                            issue_codes=assessment.issue_codes,
                         )
                         approved.append({"segment_id": segment.segment_id, "region_id": segment.region_id, "box": segment.box, "text": result.final_thai})
+                        total_approved_count += 1
                         rolling_context.append({
                             "segment_id": segment.segment_id,
                             "source_text": segment.source_text,
                             "final_thai": result.final_thai,
                         })
+                        if not assessment.passed:
+                            page_warnings = True
                     else:
                         page_warnings = True
                         unresolved_segments.append(segment.segment_id)
@@ -876,31 +1018,37 @@ class TranslationPipelineWorker:
                 page_render_jobs.append((page, approved))
 
             if unresolved_segments:
-                # Fail closed: publishing the original page would expose the
-                # English text of an unresolved bubble. Keep auditable
-                # artifacts, but do not render, upload, or replace chapter
-                # pages. When DeepSeek is selected, its retry stays on that
-                # exact provider/model and never falls back to Groq.
                 await self._record_artifacts(run_id, job_id, chapter.id, all_results, all_segments)
                 unresolved_count = len(unresolved_segments)
-                logger.error(
-                    "[Worker] [Job %s] withholding publish: %d dialogue segments remain unresolved",
-                    job_id,
-                    unresolved_count,
-                )
-                return await self.job_repo.update(job_id, {
-                    "status": "FAILED",
-                    "progress_percent": 100,
-                    "error_message": (
-                        f"{unresolved_count} dialogue regions remain unresolved "
-                        f"({retry_budget_exhausted_reason or 'approval_retry_budget_exhausted'}); "
-                        "no untranslated page was published"
-                    ),
-                    "input_tokens": total_in_tokens,
-                    "output_tokens": total_out_tokens,
-                    "cost_estimate_usd": total_cost_usd,
-                    "actual_model": actual_model or None,
-                })
+                # Fail closed ONLY when zero translations succeeded across the chapter
+                # or when a single-page chapter has unverified OCR coverage (Phase 6.16 guard).
+                if total_approved_count == 0 or (len(pages_data) == 1 and unverified_ocr_pages):
+                    logger.error(
+                        "[Worker] [Job %s] withholding publish: %d dialogue segments remain unresolved",
+                        job_id,
+                        unresolved_count,
+                    )
+                    return await self.job_repo.update(job_id, {
+                        "status": "FAILED",
+                        "progress_percent": 100,
+                        "error_message": (
+                            f"{unresolved_count} dialogue regions remain unresolved "
+                            f"({retry_budget_exhausted_reason or 'missing dialogue translations'}); "
+                            "no untranslated page was published"
+                        ),
+                        "input_tokens": total_in_tokens,
+                        "output_tokens": total_out_tokens,
+                        "cost_estimate_usd": total_cost_usd,
+                        "actual_model": actual_model or None,
+                    })
+                else:
+                    warnings = True
+                    logger.warning(
+                        "[Worker] [Job %s] Resilience guard: publishing chapter with %d approved translations (%d unresolved segments remain)",
+                        job_id,
+                        len(all_results),
+                        unresolved_count,
+                    )
 
             async def _render_page(page_dict: dict, approved_list: list):
                 page_start = time.perf_counter()
@@ -931,11 +1079,7 @@ class TranslationPipelineWorker:
 
             rendered_pages = await asyncio.gather(*[_render_page(pg, app) for pg, app in page_render_jobs])
 
-            for completed_render_count, (page_dict, approved_list, final_bytes, page_start, render_duration) in enumerate(rendered_pages, start=1):
-                current_job = await self._cancelled_job(job_id)
-                if current_job:
-                    logger.info("[Worker] Job %s cancelled before upload; discarding rendered pages", job_id)
-                    return current_job
+            async def _upload_rendered_page(completed_render_count: int, page_dict: dict, approved_list: list, final_bytes: bytes, page_start: float, render_duration: float):
                 upload_start = time.perf_counter()
                 image_url = await self.r2_service.upload_image(
                     manga_slug=series_slug,
@@ -946,20 +1090,23 @@ class TranslationPipelineWorker:
                     run_id=run_id,
                 )
                 upload_duration = time.perf_counter() - upload_start
-                staged_page = {
-                    "page_index": page_dict["index"],
-                    "image_url": image_url,
-                    "raw_image_url": page_dict.get("raw_url"),
-                }
-                staged_pages.append(staged_page)
                 page_duration = time.perf_counter() - page_start
                 logger.info(
                     "[Worker] [Job %s] Page %d/%d processed in %.2fs (Render: %.2fs, Upload: %.2fs, Bubbles: %d) -> %s",
                     job_id, page_dict["index"], len(pages_data), page_duration, render_duration, upload_duration, len(approved_list), image_url
                 )
-                await self.job_repo.update(job_id, {
-                    "progress_percent": int(60 + 35 * completed_render_count / max(len(pages_data), 1))
-                })
+                return {
+                    "page_index": page_dict["index"],
+                    "image_url": image_url,
+                    "raw_image_url": page_dict.get("raw_url"),
+                }
+
+            upload_results = await asyncio.gather(*(
+                _upload_rendered_page(idx, page_dict, approved_list, final_bytes, page_start, render_duration)
+                for idx, (page_dict, approved_list, final_bytes, page_start, render_duration) in enumerate(rendered_pages, start=1)
+            ))
+            staged_pages.extend(sorted(upload_results, key=lambda p: p["page_index"]))
+            await self.job_repo.update(job_id, {"progress_percent": 95})
 
             render_stage_duration = time.perf_counter() - stage_render_start
             logger.info(

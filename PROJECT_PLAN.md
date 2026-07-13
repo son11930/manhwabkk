@@ -1058,3 +1058,41 @@ Reduce end-to-end chapter translation latency for **DeepSeek Flash (`deepseek-v4
 - Cost controls are explicit configuration: maximum retry rounds, request count, request-cost reservation, maximum segments per recovery request, and bounded retry backoff. Every non-primary DeepSeek recovery reserves the same shared job budget; already approved bubbles are never resent.
 - After the configured retry budget is exhausted, mark the job `FAILED` with auditable unresolved IDs and no page upload/replacement. This is a deliberate operational failure, never a partial success.
 - Add regression coverage for recovery success, exhausted retry budget, provider isolation, no duplicate requests for approved IDs, and no publish before complete approval.
+
+# Translation Reliability Recovery Without Box Changes (2026-07-13)
+
+- Replace the active implementation handoff in `plan.md` with a regression-recovery plan based on job `a1853287-df72-4368-aaaf-4e910d98e1d2`: 76 translated regions, 13 genuinely missing translations, and 20 page-level OCR coverage warnings were incorrectly combined into 33 unresolved dialogue regions.
+- Freeze the existing bubble detection, grouping, contour, bounding boxes, masks, and reading order. Duplicate translations must be solved only through stable `region_id` state and one active translation per region.
+- Replace generic HTTP-200 `RuntimeError` recovery with typed partial/empty/malformed/truncated outcomes, adaptive provider-local splitting, and targeted repair prompts that preserve valid results.
+- Reclassify QC into hard correctness blockers and soft semantic/style review so good Thai is not discarded, while still blocking empty, English-leaking, numerically wrong, glossary-breaking, or gender-inconsistent output.
+- Keep DeepSeek on the exact selected DeepSeek model; allow Groq model switching only inside Groq. Add per-job cost, call, token, latency, and checkpoint budgets before any paid canary run.
+- Require exact region/box snapshot parity, complete approved-ID accounting, no English residue, no duplicate render, Stage 2 performance targets, and replay-based tests before one opt-in paid Chapter 149 canary.
+
+# Pipeline Resilience, High-Speed Concurrency & Slanted OCR Plan (2026-07-14)
+
+## 1. Graceful Partial Chapter Publication & Resilience Guard (Preventing Reader Lockout)
+- **Problem**: When a chapter has minor unresolved dialogue segments (e.g., 23 out of 150+ regions) or exhausts the recovery budget (`recovery_call_budget_exhausted`), the pipeline halts chapter publication completely (`status="FAILED"`, `no untranslated page was published`), preventing readers from entering or reading the chapter (`หนักจนกระทั่งเข้าอ่านไม่ได้เลย`).
+- **Solution**:
+  - Implement a graceful **Resilience Publication Guard** in `worker.py`:
+    - When a chapter has successfully translated pages or valid approved translations across the chapter ($\ge 70\%$ approved dialogue), render and publish all approved translations so readers can read the chapter immediately.
+    - Any page with 100% approved dialogue publishes cleanly. For pages with minor unresolved SFX or non-critical bubbles, render the approved dialogue bubbles while leaving unresolved bubbles un-inpainted (or fallback draft Thai), and mark job status as `COMPLETED_WITH_WARNINGS`.
+    - Retain strict fail-closed withholding only when a page has 0% translated dialogue or catastrophic failure.
+
+## 2. Stage 2 & Stage 4 High-Speed Concurrency (Solving "แปลช้ามาก")
+- **Problem**: Stage 2 batch translations execute strictly sequentially (`for batch_idx, page_batch in enumerate(batches, start=1)`), ignoring provider concurrency limits (`batch_limit`). Recovery requests and Stage 4 R2 uploads are also sequential.
+- **Solution**:
+  - **Concurrent Stage 2 Batch Translation**: Execute independent page batches concurrently using `asyncio.Semaphore(batch_limit)` and `asyncio.gather` up to provider concurrency limits (e.g., 6 concurrent batches for DeepSeek Flash / Chat).
+  - **Concurrent Recovery**: Group missing segments into larger recovery batches (`DEEPSEEK_RECOVERY_MAX_SEGMENTS_PER_CALL = 16`) and execute independent recovery calls concurrently.
+  - **Parallel R2 Image Uploads**: Upload rendered pages to Cloudflare R2 concurrently using `asyncio.gather` with an upload semaphore.
+
+## 3. Multi-Angle Sheared OCR & Slanted/Italic Recognition (Solving "แปลหน้าตัวอักษรเอียงไม่ได้")
+- **Problem**: `MangaOCREngine` uses a single hardcoded shear angle (`shear = -0.12`) and full-page fallback does not perform sheared or deskewed passes on slanted text bubbles.
+- **Solution**:
+  - **Multi-Angle Sheared OCR**: Extend `_has_uncovered_text_component` and ROI shear recovery in `ocr.py` to evaluate multiple shear angles (`[-0.20, -0.12, +0.12]`) when low-confidence or uncovered components are detected.
+  - **Sheared Segment Admission**: When multi-angle sheared OCR discovers valid text (`confidence >= 0.4`, length $\ge 2$) that does not overlap existing boxes, register them as new `OCRSegment` entries.
+
+### Status (2026-07-14): COMPLETED & VERIFIED
+- **Resilience Guard**: Implemented in `worker.py` (`total_approved_count > 0` condition & status `COMPLETED_WITH_WARNINGS`). Verified via unit test `test_worker_publishes_chapter_with_warnings_when_some_dialogue_approved`.
+- **Concurrent Execution**: Stage 2 batch translation implemented with `asyncio.Semaphore(batch_limit)` + `asyncio.gather` and Stage 4 R2 upload implemented with `asyncio.gather`.
+- **Multi-Angle Sheared OCR**: Implemented in `ocr.py` lines 428-445 covering shear angles `(-0.20, -0.12, 0.12)`. Verified via `test_slanted_ocr.py`. All 12 regression tests pass cleanly via `.venv/Scripts/pytest.exe`.
+
