@@ -24,6 +24,12 @@ from src.pipeline.contracts import OCRSegment, TranslationBatchRequest, Translat
 from src.pipeline.inpainter import InpainterEngine
 from src.pipeline.ocr import MangaOCREngine
 from src.pipeline.quality import TranslationQualityGate
+from src.pipeline.rendering import (
+    RenderInstruction,
+    associate_shifted_region_candidates,
+    build_render_instructions,
+    deduplicate_render_instructions,
+)
 from src.pipeline.translator import AITranslatorEngine, TranslationResponseError
 from src.infrastructure.ai.factory import get_ai_client
 from src.pipeline.deepseek_batch_translator import DeepSeekBatchTranslator, append_batch_context, group_pages_for_batching
@@ -252,10 +258,21 @@ class TranslationPipelineWorker:
                 return current_job
 
             async def _extract_page_ocr(page: dict) -> tuple[int, list]:
-                page_ocr_start = time.perf_counter()
+                queued_at = time.perf_counter()
                 async with self.cpu_semaphore:
+                    started_at = time.perf_counter()
                     batch = await self.ocr.detect_and_extract(page["image_bytes"], page_index=page["index"])
-                logger.info("[Worker] [Job %s] OCR Page %d/%d done in %.2fs (found %d bubbles)", job_id, page["index"], len(pages_data), time.perf_counter() - page_ocr_start, len(batch))
+                finished_at = time.perf_counter()
+                logger.info(
+                    "[Worker] [Job %s] OCR Page %d/%d done in %.2fs (queue %.2fs, OCR %.2fs, found %d bubbles)",
+                    job_id,
+                    page["index"],
+                    len(pages_data),
+                    finished_at - queued_at,
+                    started_at - queued_at,
+                    finished_at - started_at,
+                    len(batch),
+                )
                 return page["index"], batch
 
             ocr_results = await asyncio.gather(*[_extract_page_ocr(p) for p in pages_data])
@@ -287,14 +304,12 @@ class TranslationPipelineWorker:
             total_out_tokens = 0
             total_cost_usd = 0.0
             actual_model = ""
-            recovery_translator = self.translator
             active_ds_translator: Optional[DeepSeekBatchTranslator] = None
 
             if provider in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
                 client = ai_client or get_ai_client(provider)
                 batch_translator = DeepSeekBatchTranslator(client=client, provider=provider)
                 active_ds_translator = batch_translator
-                recovery_translator = AITranslatorEngine(client=client)
                 ordered_page_segs = [segments_by_page[page["index"]] for page in pages_data]
                 batches = group_pages_for_batching(
                     ordered_page_segs,
@@ -462,7 +477,10 @@ class TranslationPipelineWorker:
                     if s.segment_id not in result_map
                     or not result_map[s.segment_id].final_thai
                     or result_map[s.segment_id].final_thai.strip() == s.source_text.strip()
-                    or bool({"ENGLISH_LEAKAGE", "EMPTY_TRANSLATION"} & set(self.quality_gate.evaluate(s, result_map[s.segment_id].final_thai, glossary).issue_codes))
+                    or bool(
+                        _MANDATORY_RECOVERY_ISSUES
+                        & set(self.quality_gate.evaluate(s, result_map[s.segment_id].final_thai, glossary).issue_codes)
+                    )
                 ]
                 if missing_on_page and active_ds_translator is not None:
                     try:
@@ -512,7 +530,7 @@ class TranslationPipelineWorker:
                         )
                     assessment = self.quality_gate.evaluate(segment, result.final_thai, glossary)
                     needs_recovery = bool(set(assessment.issue_codes) & _MANDATORY_RECOVERY_ISSUES)
-                    if needs_recovery and not assessment.passed:
+                    if needs_recovery and not assessment.passed and active_ds_translator is None:
                         review_profile = {
                             **profile,
                             "quality_review": (
@@ -580,7 +598,10 @@ class TranslationPipelineWorker:
                                 requires_semantic_review=True,
                             )
 
-                    if not result.final_thai or result.final_thai.strip() == segment.source_text.strip():
+                    if (
+                        (not result.final_thai or result.final_thai.strip() == segment.source_text.strip())
+                        and active_ds_translator is None
+                    ):
                         try:
                             if active_ds_translator is not None:
                                 em_res = await active_ds_translator.translate_page_batch(
@@ -609,6 +630,12 @@ class TranslationPipelineWorker:
                                 assessment = self.quality_gate.evaluate(segment, result.final_thai, glossary)
                         except Exception as e:
                             logger.warning("[Worker] Emergency fallback translation failed for %s: %s", segment.segment_id, e)
+                    elif not result.final_thai or result.final_thai.strip() == segment.source_text.strip():
+                        logger.warning(
+                            "[Worker] [Job %s] DeepSeek page recovery left %s untranslated; retaining it for review without cross-model fallback",
+                            job_id,
+                            segment.segment_id,
+                        )
 
                     if assessment.passed:
                         result = TranslationResult(
@@ -621,7 +648,7 @@ class TranslationPipelineWorker:
                             qc_status="APPROVED",
                             issue_codes=result.issue_codes,
                         )
-                        approved.append({"box": segment.box, "text": result.final_thai})
+                        approved.append({"segment_id": segment.segment_id, "region_id": segment.region_id, "box": segment.box, "text": result.final_thai})
                         rolling_context.append({
                             "segment_id": segment.segment_id,
                             "source_text": segment.source_text,
@@ -644,6 +671,27 @@ class TranslationPipelineWorker:
                 if page_warnings:
                     warnings = True
                 all_results.extend(final_page_results)
+                render_candidates = associate_shifted_region_candidates(
+                    RenderInstruction(
+                        region_id=str(translation["region_id"]),
+                        box=translation["box"],
+                        text=translation["text"],
+                    )
+                    for translation in approved
+                )
+                render_instructions = deduplicate_render_instructions(render_candidates)
+                build_render_instructions(render_instructions)
+                if len(render_instructions) != len(approved):
+                    logger.warning(
+                        "[Worker] [Job %s] Page %d suppressed %d nested duplicate render regions",
+                        job_id,
+                        page["index"],
+                        len(approved) - len(render_instructions),
+                    )
+                approved = [
+                    {"box": instruction.box, "text": instruction.text}
+                    for instruction in render_instructions
+                ]
                 page_render_jobs.append((page, approved))
 
             async def _render_page(page_dict: dict, approved_list: list):

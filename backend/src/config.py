@@ -6,6 +6,7 @@ from pydantic import Field
 # Base project directory
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 ENV_FILE = os.path.join(BASE_DIR, ".env")
+DEFAULT_LOG_PATH = BASE_DIR / "logs" / "backend.jsonl"
 
 class Settings(BaseSettings):
     APP_NAME: str = Field(default="Manga AI Translation API")
@@ -39,6 +40,13 @@ class Settings(BaseSettings):
     DEEPSEEK_MAX_BATCH_INPUT_CHARS: int = Field(default=120000)
     DEEPSEEK_TIMEOUT_SECONDS: int = Field(default=90)
     DEEPSEEK_MAX_RETRIES: int = Field(default=2)
+
+    # Operational logging. The JSON file contains only safe metadata and is rotated.
+    LOG_LEVEL: str = Field(default="INFO")
+    LOG_FILE_ENABLED: bool = Field(default=True)
+    LOG_FILE_PATH: str = Field(default=str(DEFAULT_LOG_PATH))
+    LOG_FILE_MAX_BYTES: int = Field(default=5 * 1024 * 1024)
+    LOG_FILE_BACKUP_COUNT: int = Field(default=5)
 
     model_config = SettingsConfigDict(
         env_file=ENV_FILE,

@@ -1,11 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
 import sys
 if sys.platform == "win32":
     try:
@@ -29,6 +24,7 @@ if sys.platform == "win32":
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from src.config import settings
+from src.logging_config import configure_logging
 from src.database import engine, Base, async_session_maker
 from src.common.exceptions import DomainException
 from src.common.envelope import error_response
@@ -37,6 +33,8 @@ from src.domains.translation import models as translation_models  # noqa: F401
 from src.domains.auth.router import router as auth_router
 from src.domains.manga.router import router as manga_router
 from src.domains.jobs.router import router as jobs_router
+
+configure_logging(settings)
 
 def _sync_migrate(connection):
     from sqlalchemy import inspect, text

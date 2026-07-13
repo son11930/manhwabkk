@@ -7,6 +7,11 @@ from typing import Any, Mapping, Tuple
 Box = Tuple[int, int, int, int]
 
 
+def stable_region_id(page_index: int, reading_order: int) -> str:
+    """Identity assigned by OCR bubble grouping, not by unstable box pixels."""
+    return f"{page_index}:bubble:{reading_order}"
+
+
 @dataclass(frozen=True)
 class OCRSegment:
     """Immutable OCR evidence for one ordered speech segment."""
@@ -18,6 +23,7 @@ class OCRSegment:
     raw_lines: Tuple[str, ...]
     source_text: str
     confidence: float
+    region_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.segment_id.strip():
@@ -28,6 +34,8 @@ class OCRSegment:
             raise ValueError("confidence must be between 0 and 1")
         if len(self.box) != 4:
             raise ValueError("box must contain four coordinates")
+        if not self.region_id:
+            object.__setattr__(self, "region_id", stable_region_id(self.page_index, self.reading_order))
 
 
 @dataclass(frozen=True)

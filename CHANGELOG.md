@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Fixed
+- Replaced detected-page full-image affine OCR retries with bounded bubble crops, added queue-versus-compute OCR timings, and added regression fixtures for stylized comic text.
+- Added source-text normalization and bounded crop-line admission so malformed italic OCR cannot merge adjacent speech bubbles; the supplied fixtures now preserve the intended `LU SHU`, `IS HE`, `THIRTY-FIVE`, and `STONES!` source text.
+- Consolidated DeepSeek mandatory recovery into its page batch and retain unresolved dialogue for review rather than issuing serial Stage 3 calls or crossing into another provider/model.
+- Added a one-render-per-region collision guard that suppresses nested OCR fragments before cleaning or typesetting, preventing duplicate Thai overlays.
+- Added configurable redacted rotating JSONL backend logs for durable job diagnostics without storing prompts, dialogue, headers, credentials, or translation payloads.
 - Added bounded italic/shear OCR recovery using high-confidence coverage checks, upscaled affine variants, inverse-mapped boxes, and duplicate suppression. The supplied comic fixtures now recover previously missed `VOICE` and `STONES!` lettering.
 - DeepSeek batch parsing now preserves valid translations from incomplete or malformed-tail JSON and retries only missing IDs through the selected DeepSeek provider/model.
 - DeepSeek now commits each completed batch into an ordered eight-dialogue context window before translating the next batch. This preserves recent Thai pronouns, character relationships, and dialogue continuity without ever switching providers.
@@ -19,6 +24,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added bounded orientation-aware OCR recovery for slanted low-confidence text: the pipeline rectifies up to four detected text ROIs, retains original page coordinates, and replaces text only when a higher-confidence deskewed candidate preserves stronger textual evidence.
 
 ### Planned / Architecture
+- Added a source-integrity and visual-idempotency plan after the latest rendered output still showed `LO/OHS 01/15/THIRTY-FINE` OCR corruption, untranslated English residue, and duplicate Thai overlays. The plan introduces stable bubble regions, exact fixture transcripts, source QC, candidate consensus, one-region-one-render enforcement, and bubble-masked inpainting.
+- Completed the latest Chapter 149 baseline from screenshots: 722.86s across Stage 1–3, including 447.19s OCR, 150.17s primary translation, a failed 22-ID partial recovery, and at least 41 serial Stage 3 recovery segments; added checkpoint-wave, deadline, polling-log sampling, and end-to-end acceptance work to the plan.
+- Extended the active plan using the latest Chapter 149 log: add redacted rotating job logs, move roughly 111.85 seconds of hidden pre-render AI/QC recovery out of Stage 3, unify recovery behind an attempt ledger, and pipeline rendering with bounded concurrent uploads.
+- Replaced the active implementation handoff in `plan.md` with a Stage 1 OCR performance-recovery plan: measure queue versus compute time, replace full-page 2x shear passes with bounded ROI-first recovery, enforce pixel/concurrency budgets, and retain the `VOICE`/`STONES` regression gates.
 - Analyzed DeepSeek Flash translation pipeline bottlenecks (~400s at 62% progress) using the `planner` subagent and published a complete ~60s optimization roadmap in `PROJECT_PLAN.md` covering HTTP keep-alive connection pooling, parallel OCR extraction (`asyncio.gather`), high-concurrency Flash batch translation, and concurrent page rendering & R2 uploads.
 
 ### Performance

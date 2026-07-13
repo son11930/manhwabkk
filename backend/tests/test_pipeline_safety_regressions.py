@@ -107,6 +107,7 @@ def test_ocr_recovers_missing_italic_line_even_when_primary_confidence_is_high()
 
     segments = engine.detect_and_extract_sync(image_bytes.getvalue(), page_index=1)
 
+    assert len(segments) == 1
     assert any("STONES!" in segment.source_text for segment in segments)
 
 

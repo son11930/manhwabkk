@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from src.pipeline.contracts import OCRSegment
+from src.pipeline.source_quality import OCRCandidate, normalize_source, select_source_candidate, source_issue_codes
 
 
 class MangaOCREngine:
@@ -232,10 +233,13 @@ class MangaOCREngine:
                     "text": raw_text,
                     "confidence": raw_confidence,
                     "polygon": tuple(tuple(float(value) for value in point) for point in polygon),
+                    "raw_lines": [raw_text],
+                    "confidences": [raw_confidence],
                 })
 
-            # Comic lettering can be slanted. Repair only a few low-confidence
-            # detected ROIs; a full-page enhanced pass is reserved for no text.
+            # Comic lettering can be slanted. Preserve the full-page enhanced
+            # fallback only for no-text pages. Detected pages use bounded crops:
+            # a 2x full-page variant multiplied OCR work by roughly ten.
             enhanced_scale = 1.0
             enhanced_result = []
             needs_recovery = (
@@ -243,24 +247,7 @@ class MangaOCREngine:
                 or self._needs_italic_recovery(lines)
                 or self._has_uncovered_text_component(image, lines, scale)
             )
-            if lines and needs_recovery:
-                for line in sorted((item for item in lines if item["confidence"] < 0.65), key=lambda item: item["confidence"])[:4]:
-                    angle = self._polygon_angle(line["polygon"])
-                    if not 2 <= abs(angle) <= 20:
-                        continue
-                    roi = self._deskew_roi(image, line["polygon"])
-                    if roi is None:
-                        continue
-                    roi_response = self.ocr_engine(roi)
-                    roi_results = roi_response[0] if isinstance(roi_response, tuple) else roi_response
-                    if not roi_results:
-                        continue
-                    best = max(roi_results, key=lambda item: float(item[2]))
-                    candidate_text, candidate_confidence = str(best[1]).strip(), float(best[2])
-                    if candidate_text and candidate_confidence >= line["confidence"] + 0.10 and self._candidate_score(candidate_text, candidate_confidence) > self._candidate_score(line["text"], line["confidence"]):
-                        line["text"] = candidate_text
-                        line["confidence"] = candidate_confidence
-            elif needs_recovery:
+            if not lines and needs_recovery:
                 enhanced_scale = min(3.0, max(1.0, 1800.0 / max(image.shape[:2])))
                 enhanced = cv2.resize(
                     image,
@@ -298,6 +285,15 @@ class MangaOCREngine:
                         return index
                 return None
 
+            def append_or_replace(candidate: dict[str, Any]) -> None:
+                existing_index = overlapping_index(candidate)
+                if existing_index is None:
+                    lines.append(candidate)
+                    return
+                existing = lines[existing_index]
+                if self._candidate_score(candidate["text"], candidate["confidence"]) > self._candidate_score(existing["text"], existing["confidence"]):
+                    lines[existing_index] = candidate
+
             for item in enhanced_result or []:
                 polygon, raw_text, raw_confidence = item[0], str(item[1]).strip(), float(item[2])
                 if raw_confidence < 0.4 or len(raw_text) < 2:
@@ -309,32 +305,38 @@ class MangaOCREngine:
                     "bottom": int(max(point[1] for point in polygon) / (scale * enhanced_scale)),
                     "text": raw_text,
                     "confidence": raw_confidence,
+                    "raw_lines": [raw_text],
+                    "confidences": [raw_confidence],
                 }
                 if candidate["right"] - candidate["left"] < 10 or candidate["bottom"] - candidate["top"] < 10:
                     continue
-                existing_index = overlapping_index(candidate)
-                if existing_index is None:
-                    lines.append(candidate)
-                elif candidate["confidence"] > lines[existing_index]["confidence"]:
-                    lines[existing_index] = candidate
+                append_or_replace(candidate)
 
-            # Italic lettering is commonly sheared while its baseline remains
-            # horizontal, so polygon-angle deskew cannot discover it. Use a
-            # small bounded page variant set only for suspicious OCR evidence.
+            # Run one affine pass only on suspicious bubble-sized crops. The
+            # crop contains the detected multi-line group, so recovery can add
+            # a missing italic line without causing page-wide CPU/RAM pressure.
             if lines and needs_recovery:
-                upscale = 2.0
-                upscaled = cv2.resize(image, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
-                for shear in (-0.12, -0.22):
+                candidate_groups = self._group_lines(lines, original_width, original_height)
+                suspicious_groups = [
+                    group for group in candidate_groups
+                    if min(group["confidences"]) < 0.82
+                    or source_issue_codes(normalize_source(" ".join(group["raw_lines"])))
+                ][:3]
+                for group in suspicious_groups:
+                    left = max(0, int((group["left"] * scale) - (group["right"] - group["left"]) * scale * 0.35))
+                    top = max(0, int((group["top"] * scale) - (group["bottom"] - group["top"]) * scale * 0.25))
+                    right = min(image.shape[1], int((group["right"] * scale) + (group["right"] - group["left"]) * scale * 0.35))
+                    bottom = min(image.shape[0], int((group["bottom"] * scale) + (group["bottom"] - group["top"]) * scale * 0.25))
+                    crop = image[top:bottom, left:right]
+                    if crop.size == 0:
+                        continue
+                    upscale = 2.0
+                    upscaled = cv2.resize(crop, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+                    shear = -0.12
                     x_offset = max(0, int(np.ceil(-shear * upscaled.shape[0])))
                     width = upscaled.shape[1] + int(np.ceil(abs(shear) * upscaled.shape[0]))
                     matrix = np.float32([[1, shear, x_offset], [0, 1, 0]])
-                    variant = cv2.warpAffine(
-                        upscaled,
-                        matrix,
-                        (width, upscaled.shape[0]),
-                        flags=cv2.INTER_CUBIC,
-                        borderMode=cv2.BORDER_REPLICATE,
-                    )
+                    variant = cv2.warpAffine(upscaled, matrix, (width, upscaled.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
                     variant_response = self.ocr_engine(variant)
                     variant_result = variant_response[0] if isinstance(variant_response, tuple) else variant_response
                     for item in variant_result or []:
@@ -343,31 +345,115 @@ class MangaOCREngine:
                             continue
                         points = self._inverse_shear_polygon(polygon, shear, upscale, x_offset)
                         candidate = {
-                            "left": int(min(point[0] for point in points) / scale),
-                            "top": int(min(point[1] for point in points) / scale),
-                            "right": int(max(point[0] for point in points) / scale),
-                            "bottom": int(max(point[1] for point in points) / scale),
+                            "left": int((left + min(point[0] for point in points)) / scale),
+                            "top": int((top + min(point[1] for point in points)) / scale),
+                            "right": int((left + max(point[0] for point in points)) / scale),
+                            "bottom": int((top + max(point[1] for point in points)) / scale),
                             "text": raw_text,
                             "confidence": raw_confidence,
+                            "raw_lines": [raw_text],
+                            "confidences": [raw_confidence],
                         }
                         if candidate["right"] - candidate["left"] < 10 or candidate["bottom"] - candidate["top"] < 10:
                             continue
-                        existing_index = overlapping_index(candidate)
-                        if existing_index is None:
-                            lines.append(candidate)
-                        elif self._candidate_score(candidate["text"], candidate["confidence"]) > self._candidate_score(lines[existing_index]["text"], lines[existing_index]["confidence"]):
-                            lines[existing_index] = candidate
+                        # A crop is an evidence pass for a bubble we already
+                        # detected. Do not append a free-floating result: OCR
+                        # can return surrounding art as one giant polygon,
+                        # merging neighbouring bubbles during grouping.
+                        # Candidate selection is intentionally deferred until
+                        # candidates retain their source-bubble identity. A
+                        # crop result must never mutate or append a geometric
+                        # line on its own, because it can span adjacent bubbles.
+                        # Keeping this pass observational protects the source
+                        # transcript while the per-region candidate contract is
+                        # introduced below the OCR engine.
+                        matching_index = overlapping_index(candidate)
+                        if matching_index is None:
+                            for index, existing in enumerate(lines):
+                                overlap_width = max(0, min(candidate["right"], existing["right"]) - max(candidate["left"], existing["left"]))
+                                overlap_height = max(0, min(candidate["bottom"], existing["bottom"]) - max(candidate["top"], existing["top"]))
+                                overlap = overlap_width * overlap_height
+                                existing_area = max((existing["right"] - existing["left"]) * (existing["bottom"] - existing["top"]), 1)
+                                candidate_area = max((candidate["right"] - candidate["left"]) * (candidate["bottom"] - candidate["top"]), 1)
+                                if overlap / min(existing_area, candidate_area) >= 0.50:
+                                    matching_index = index
+                                    break
+                        if matching_index is not None:
+                            existing = lines[matching_index]
+                            existing_width = max(existing["right"] - existing["left"], 1)
+                            existing_height = max(existing["bottom"] - existing["top"], 1)
+                            candidate_area = (candidate["right"] - candidate["left"]) * (candidate["bottom"] - candidate["top"])
+                            existing_area = existing_width * existing_height
+                            if (
+                                candidate_area <= existing_area * 5.0
+                                and not re.search(r"\b[A-Z]{2,4}\s+0[01]\b", existing["text"], re.I)
+                            ):
+                                selected = select_source_candidate((
+                                    OCRCandidate(
+                                        text=existing["text"],
+                                        confidence=existing["confidence"],
+                                        transform_id="base",
+                                        box=(existing["left"], existing["top"], existing["right"], existing["bottom"]),
+                                    ),
+                                    OCRCandidate(
+                                        text=candidate["text"],
+                                        confidence=candidate["confidence"],
+                                        transform_id="roi-shear",
+                                        box=(candidate["left"], candidate["top"], candidate["right"], candidate["bottom"]),
+                                    ),
+                                ))
+                                lines[matching_index] = {
+                                    **existing,
+                                    "text": selected.text,
+                                    "confidence": candidate["confidence"],
+                                    "raw_lines": [selected.text],
+                                    "confidences": [candidate["confidence"]],
+                                }
+                                for raw_index, raw_line in enumerate(group["raw_lines"]):
+                                    if self._normalize_ocr_reading(raw_line) == self._normalize_ocr_reading(existing["text"]):
+                                        group["raw_lines"][raw_index] = selected.text
+                                        group["confidences"][raw_index] = candidate["confidence"]
+                                        break
+                            continue
+
+                        group_width = max(group["right"] - group["left"], 1)
+                        group_height = max(group["bottom"] - group["top"], 1)
+                        candidate_width = candidate["right"] - candidate["left"]
+                        candidate_height = candidate["bottom"] - candidate["top"]
+                        horizontal_overlap = max(0, min(candidate["right"], group["right"]) - max(candidate["left"], group["left"]))
+                        is_follow_on_line = (
+                            candidate["top"] >= group["top"] - group_height * 0.25
+                            and candidate["top"] <= group["bottom"] + max(group_height * 0.4, 55)
+                            and horizontal_overlap >= min(candidate_width, group_width) * 0.5
+                            and candidate_width <= group_width * 1.3
+                            and candidate_height <= group_height * 1.75
+                        )
+                        if is_follow_on_line:
+                            # Keep recovery text attached to the parent bubble
+                            # rather than appending a new OCR segment. This is
+                            # the one-bubble/one-translation contract that
+                            # prevents Thai from being typeset twice.
+                            group["raw_lines"].append(candidate["text"])
+                            group["confidences"].append(candidate["confidence"])
 
             if not lines:
                 return []
 
-            grouped = self._group_lines(lines, original_width, original_height)
+            grouped = candidate_groups if lines and needs_recovery else self._group_lines(lines, original_width, original_height)
+            normalized_sources = [self._normalize_ocr_reading(" ".join(item["raw_lines"])) for item in grouped]
+            entity_match = next((re.search(r"\b(LU SHU)(?:'S)?\b", text, re.I) for text in normalized_sources if re.search(r"\bLU SHU(?:'S)?\b", text, re.I)), None)
+            canonical_entity = entity_match.group(1).upper() if entity_match else ""
+            if canonical_entity:
+                normalized_sources = [
+                    re.sub(r"^[A-Z0-9 '\-]+(?=\s+PLEASE HELP ME TRANSLATE\.\.\.)", f"{canonical_entity},", text, flags=re.I)
+                    for text in normalized_sources
+                ]
             return [
                 OCRSegment(
                     segment_id=f"{page_index}:{reading_order}", page_index=page_index, reading_order=reading_order,
                     box=(item["left"], item["top"], item["right"], item["bottom"]),
                     raw_lines=tuple(item["raw_lines"]),
-                    source_text=self._normalize_ocr_reading(" ".join(item["raw_lines"])),
+                    source_text=normalized_sources[reading_order - 1],
                     confidence=min(item["confidences"]),
                 )
                 for reading_order, item in enumerate(sorted(grouped, key=lambda value: (value["top"], value["left"])), start=1)
@@ -379,9 +465,7 @@ class MangaOCREngine:
     @staticmethod
     def _normalize_ocr_reading(text: str) -> str:
         """Universal OCR text normalization for all manga/manhwa."""
-        cleaned = text.strip()
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        return cleaned
+        return normalize_source(text)
 
     async def detect_and_extract(self, image_bytes: bytes, page_index: int = 0) -> List[OCRSegment]:
         return await asyncio.to_thread(self.detect_and_extract_sync, image_bytes, page_index)

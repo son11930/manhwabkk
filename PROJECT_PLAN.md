@@ -1014,3 +1014,32 @@ Reduce end-to-end chapter translation latency for **DeepSeek Flash (`deepseek-v4
 - Add OCR-independent bubble/text coverage audit, targeted bubble crops, and a bounded shear/contrast/rotation transform cascade.
 - Select recovered text by visual coverage and multi-transform consensus; preserve punctuation, bubble grouping, reading order, and bounded boxes.
 - Acceptance fixtures must recover `LU SHU'S VOICE!!`, `IS HE?`, both `THIRTY-FIVE` occurrences, and `STONES!` within strict CPU budgets.
+
+# Stage 1 OCR Performance Recovery Plan (2026-07-13)
+
+- Replace full-page 2x two-shear recovery on detected-text pages with bounded ROI-first recovery while retaining italic-text recall.
+- Add separate queue/process/pass/pixel metrics before tuning so semaphore wait is not misreported as OCR compute time.
+- Introduce per-page ROI, attempt, and pixel budgets plus separate base/recovery concurrency controls.
+- Benchmark Chapter 149 with warm median runs; target Stage 1 <=45s median and <=60s hard ceiling while retaining all primary segments and the `VOICE`/`STONES` fixtures.
+- Execute later via TDD, update `CHANGELOG.md`, run backend coverage/regressions, and complete code review before commit.
+
+# Persistent Job Logs and Stage 3 Recovery Separation (2026-07-13)
+
+- The latest Chapter 149 run takes about 722.86s after Stage 1 starts: Stage 1 OCR 447.19s, Stage 2 translation 150.17s, and Stage 3 125.50s.
+- Stage 3's final render/upload wave completes within 13.65s; approximately 111.85s is hidden in sequential pre-render translation/QC recovery.
+- Batch 2 preserves 6 translations but its missing-only recovery for 22 IDs fails after about 55.76s, causing at least 41 segments across nine pages to enter serial Stage 3 recovery.
+- Add redacted rotating structured logs so a complete job can be inspected by job ID without relying on console screenshots.
+- Move all provider-local translation, QC, missing-only recovery, and attempt accounting into Stage 2; Stage 3 must perform zero AI calls.
+- Replace duplicate page/QC/emergency recovery branches with one bounded recovery queue and immutable per-segment state ledger.
+- Pipeline render and bounded concurrent upload while preserving atomic publication and deterministic page order.
+- Target Chapter 149 Stage 3 at <=18s median and <=25s hard ceiling, with no duplicate recovery request or provider/model crossover.
+- Compare serial translation with two-batch checkpoint waves, enforce request/recovery deadlines, and target Stage 2 primary plus recovery at <=75s without reducing context quality.
+
+# Verified Source OCR and One-Bubble-One-Render Plan (2026-07-13)
+
+- Current golden fixtures still select corrupted source text (`LO SHU`, `OHS 01`, `15 HE`, `THIRTY-FINE`), so translation cannot reliably produce the intended meaning.
+- Introduce stable bubble-region identity, multi-transform candidate evidence, and a source-quality gate before any translation call.
+- Require exact source transcripts for `img/1.PNG` and `img/2.PNG`, including both `THIRTY-FIVE` occurrences, instead of keyword-only OCR tests.
+- Enforce one active OCR segment, translation result, clean mask, and render instruction per visual bubble; recovery replaces region state rather than appending overlays.
+- Add render collision preflight and bubble-masked glyph inpainting so duplicate Thai overlays and residual English text cannot be published.
+- Preserve separate adjacent bubbles even when their text is identical, and keep all recovery inside the existing CPU/provider budgets.
