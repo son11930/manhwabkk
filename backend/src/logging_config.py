@@ -19,7 +19,14 @@ _SENSITIVE_PAYLOAD_PATTERN = re.compile(
     r"prompt|messages?|translations?)\b\s*[:=])",
     re.IGNORECASE,
 )
-_SAFE_CONTEXT_KEYS = frozenset({"job_id", "stage", "page", "event", "provider", "model"})
+_SAFE_CONTEXT_KEYS = frozenset({
+    "job_id", "stage", "page", "event", "provider", "model",
+    "base_passes", "roi_passes", "full_page_passes", "base_pixels", "roi_pixels",
+    "base_pass_ms", "component_scan_ms", "roi_recovery_ms", "recovery_trigger",
+    "recovery_skipped_reason", "queue_wait_ms", "process_ms", "queue_p50_ms",
+    "queue_p95_ms", "process_p50_ms", "process_p95_ms", "recovery_hits", "pages",
+    "coverage_verified", "uncovered_components",
+})
 
 
 @dataclass(frozen=True)

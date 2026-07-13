@@ -4,12 +4,74 @@ from typing import Any, List
 import asyncio
 import re
 import math
+import logging
+import time
+import threading
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 from src.pipeline.contracts import OCRSegment
 from src.pipeline.source_quality import OCRCandidate, normalize_source, select_source_candidate, source_issue_codes
+from src.config import settings
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class OCRRunBudget:
+    """Safe per-page limits for OCR recovery work."""
+
+    max_rois: int
+    max_pixel_ratio: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "max_rois", max(0, min(int(self.max_rois), 8)))
+        object.__setattr__(self, "max_pixel_ratio", max(0.0, min(float(self.max_pixel_ratio), 4.0)))
+
+
+@dataclass(frozen=True)
+class OCRRunMetrics:
+    """Dialogue-free workload accounting returned with one OCR page result."""
+
+    base_passes: int = 0
+    roi_passes: int = 0
+    full_page_passes: int = 0
+    base_pixels: int = 0
+    roi_pixels: int = 0
+    base_pass_ms: float = 0.0
+    component_scan_ms: float = 0.0
+    roi_recovery_ms: float = 0.0
+    recovery_trigger: str = "not_needed"
+    recovery_skipped_reason: str = ""
+    coverage_verified: bool = True
+    uncovered_components: int = 0
+
+    def safe_log_fields(self) -> dict[str, object]:
+        return {
+            "base_passes": self.base_passes,
+            "roi_passes": self.roi_passes,
+            "full_page_passes": self.full_page_passes,
+            "base_pixels": self.base_pixels,
+            "roi_pixels": self.roi_pixels,
+            "base_pass_ms": round(self.base_pass_ms, 2),
+            "component_scan_ms": round(self.component_scan_ms, 2),
+            "roi_recovery_ms": round(self.roi_recovery_ms, 2),
+            "recovery_trigger": self.recovery_trigger,
+            "recovery_skipped_reason": self.recovery_skipped_reason,
+            "coverage_verified": self.coverage_verified,
+            "uncovered_components": self.uncovered_components,
+        }
+
+
+class OCRExtractionResult(list[OCRSegment]):
+    """List-compatible OCR output with immutable, per-page safe metrics."""
+
+    def __init__(self, segments: list[OCRSegment] = (), metrics: OCRRunMetrics = OCRRunMetrics()):
+        super().__init__(segments)
+        self.metrics = metrics
 
 
 class MangaOCREngine:
@@ -33,6 +95,13 @@ class MangaOCREngine:
         except Exception:
             self.ocr_engine = None
             self.is_ready = False
+        self.run_budget = OCRRunBudget(
+            max_rois=settings.OCR_RECOVERY_MAX_ROIS,
+            max_pixel_ratio=settings.OCR_RECOVERY_MAX_PIXEL_RATIO,
+        )
+        # Recovery is optional evidence gathering. Never queue a base OCR
+        # worker behind it; a saturated slot records a reviewable skip instead.
+        self.recovery_semaphore = threading.BoundedSemaphore(settings.OCR_RECOVERY_CONCURRENCY)
 
     @staticmethod
     def _is_glued_text(text: str) -> bool:
@@ -197,13 +266,14 @@ class MangaOCREngine:
 
     def detect_and_extract_sync(self, image_bytes: bytes, page_index: int = 0) -> List[OCRSegment]:
         if not self.is_ready or not image_bytes:
-            return []
+            return OCRExtractionResult()
 
         try:
             image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
             if image is None:
-                return []
+                return OCRExtractionResult()
             original_height, original_width = image.shape[:2]
+            base_started_at = time.perf_counter()
 
             scale = 1.0
             if image.shape[1] > 2400:
@@ -211,6 +281,7 @@ class MangaOCREngine:
                 image = cv2.resize(image, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
 
             response = self.ocr_engine(image)
+            base_pass_ms = (time.perf_counter() - base_started_at) * 1000
             result = response[0] if isinstance(response, tuple) else response
             result = result or []
 
@@ -242,11 +313,19 @@ class MangaOCREngine:
             # a 2x full-page variant multiplied OCR work by roughly ten.
             enhanced_scale = 1.0
             enhanced_result = []
-            needs_recovery = (
-                not lines
-                or self._needs_italic_recovery(lines)
-                or self._has_uncovered_text_component(image, lines, scale)
+            full_page_passes = 1
+            component_started_at = time.perf_counter()
+            has_uncovered_component = self._has_uncovered_text_component(image, lines, scale)
+            component_scan_ms = (time.perf_counter() - component_started_at) * 1000
+            low_confidence = self._needs_italic_recovery(lines)
+            needs_recovery = bool(settings.OCR_RECOVERY_ENABLED and (not lines or low_confidence or has_uncovered_component))
+            recovery_trigger = (
+                "no_text" if not lines else "low_confidence" if low_confidence else "uncovered_component" if has_uncovered_component else "not_needed"
             )
+            roi_passes = 0
+            roi_pixels = 0
+            roi_started_at = time.perf_counter()
+            recovery_skipped_reason = ""
             if not lines and needs_recovery:
                 enhanced_scale = min(3.0, max(1.0, 1800.0 / max(image.shape[:2])))
                 enhanced = cv2.resize(
@@ -266,6 +345,7 @@ class MangaOCREngine:
                     9,
                 )
                 enhanced_response = self.ocr_engine(cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR))
+                full_page_passes += 1
                 enhanced_result = enhanced_response[0] if isinstance(enhanced_response, tuple) else enhanced_response
 
             def overlapping_index(candidate: dict[str, Any]) -> int | None:
@@ -316,12 +396,17 @@ class MangaOCREngine:
             # crop contains the detected multi-line group, so recovery can add
             # a missing italic line without causing page-wide CPU/RAM pressure.
             if lines and needs_recovery:
+                run_budget = getattr(
+                    self,
+                    "run_budget",
+                    OCRRunBudget(settings.OCR_RECOVERY_MAX_ROIS, settings.OCR_RECOVERY_MAX_PIXEL_RATIO),
+                )
                 candidate_groups = self._group_lines(lines, original_width, original_height)
                 suspicious_groups = [
                     group for group in candidate_groups
                     if min(group["confidences"]) < 0.82
                     or source_issue_codes(normalize_source(" ".join(group["raw_lines"])))
-                ][:3]
+                ][:run_budget.max_rois]
                 for group in suspicious_groups:
                     left = max(0, int((group["left"] * scale) - (group["right"] - group["left"]) * scale * 0.35))
                     top = max(0, int((group["top"] * scale) - (group["bottom"] - group["top"]) * scale * 0.25))
@@ -331,13 +416,28 @@ class MangaOCREngine:
                     if crop.size == 0:
                         continue
                     upscale = 2.0
+                    recovery_pixels = int(crop.shape[0] * crop.shape[1] * upscale * upscale)
+                    max_recovery_pixels = int(original_width * original_height * run_budget.max_pixel_ratio)
+                    if roi_pixels + recovery_pixels > max_recovery_pixels:
+                        recovery_skipped_reason = "pixel_budget_exhausted"
+                        break
+                    recovery_semaphore = getattr(self, "recovery_semaphore", None)
+                    if recovery_semaphore is not None and not recovery_semaphore.acquire(blocking=False):
+                        recovery_skipped_reason = "recovery_concurrency_saturated"
+                        continue
                     upscaled = cv2.resize(crop, (0, 0), fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
                     shear = -0.12
                     x_offset = max(0, int(np.ceil(-shear * upscaled.shape[0])))
                     width = upscaled.shape[1] + int(np.ceil(abs(shear) * upscaled.shape[0]))
                     matrix = np.float32([[1, shear, x_offset], [0, 1, 0]])
                     variant = cv2.warpAffine(upscaled, matrix, (width, upscaled.shape[0]), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-                    variant_response = self.ocr_engine(variant)
+                    try:
+                        variant_response = self.ocr_engine(variant)
+                        roi_passes += 1
+                        roi_pixels += recovery_pixels
+                    finally:
+                        if recovery_semaphore is not None:
+                            recovery_semaphore.release()
                     variant_result = variant_response[0] if isinstance(variant_response, tuple) else variant_response
                     for item in variant_result or []:
                         polygon, raw_text, raw_confidence = item[0], str(item[1]).strip(), float(item[2])
@@ -437,7 +537,17 @@ class MangaOCREngine:
                             group["confidences"].append(candidate["confidence"])
 
             if not lines:
-                return []
+                metrics = OCRRunMetrics(
+                    base_passes=1, roi_passes=roi_passes, full_page_passes=full_page_passes,
+                    base_pixels=int(image.shape[0] * image.shape[1]), roi_pixels=roi_pixels,
+                    base_pass_ms=base_pass_ms, component_scan_ms=component_scan_ms,
+                    roi_recovery_ms=(time.perf_counter() - roi_started_at) * 1000,
+                    recovery_trigger=recovery_trigger, recovery_skipped_reason=recovery_skipped_reason,
+                    coverage_verified=not has_uncovered_component,
+                    uncovered_components=int(has_uncovered_component),
+                )
+                self._log_metrics(page_index, metrics)
+                return OCRExtractionResult(metrics=metrics)
 
             grouped = candidate_groups if lines and needs_recovery else self._group_lines(lines, original_width, original_height)
             normalized_sources = [self._normalize_ocr_reading(" ".join(item["raw_lines"])) for item in grouped]
@@ -448,7 +558,7 @@ class MangaOCREngine:
                     re.sub(r"^[A-Z0-9 '\-]+(?=\s+PLEASE HELP ME TRANSLATE\.\.\.)", f"{canonical_entity},", text, flags=re.I)
                     for text in normalized_sources
                 ]
-            return [
+            segments = [
                 OCRSegment(
                     segment_id=f"{page_index}:{reading_order}", page_index=page_index, reading_order=reading_order,
                     box=(item["left"], item["top"], item["right"], item["bottom"]),
@@ -458,9 +568,33 @@ class MangaOCREngine:
                 )
                 for reading_order, item in enumerate(sorted(grouped, key=lambda value: (value["top"], value["left"])), start=1)
             ]
+            # An OCR call completing is not evidence that it recognized the
+            # originally uncovered glyphs.  Until a future component-to-glyph
+            # matcher can prove the component is covered, leave this page
+            # unverified and let the worker withhold publication.
+            coverage_verified = not has_uncovered_component
+            metrics = OCRRunMetrics(
+                base_passes=1, roi_passes=roi_passes,
+                full_page_passes=full_page_passes,
+                base_pixels=int(image.shape[0] * image.shape[1]), roi_pixels=roi_pixels,
+                base_pass_ms=base_pass_ms, component_scan_ms=component_scan_ms,
+                roi_recovery_ms=(time.perf_counter() - roi_started_at) * 1000,
+                recovery_trigger=recovery_trigger, recovery_skipped_reason=recovery_skipped_reason,
+                coverage_verified=coverage_verified,
+                uncovered_components=int(has_uncovered_component),
+            )
+            self._log_metrics(page_index, metrics)
+            return OCRExtractionResult(segments, metrics)
         except Exception as error:
-            print(f"[OCR Error] {error}")
-            return []
+            logger.exception("OCR page failed", extra={"page": page_index, "event": "ocr_page_failed"})
+            return OCRExtractionResult()
+
+    @staticmethod
+    def _log_metrics(page_index: int, metrics: OCRRunMetrics) -> None:
+        logger.info(
+            "OCR page workload",
+            extra={"page": page_index, "event": "ocr_page_metrics", **metrics.safe_log_fields()},
+        )
 
     @staticmethod
     def _normalize_ocr_reading(text: str) -> str:

@@ -16,6 +16,7 @@ import pytest
 from PIL import Image
 
 from src.pipeline.contracts import OCRSegment, TranslationBatchRequest, TranslationResult
+from src.pipeline.ocr import OCRExtractionResult, OCRRunMetrics
 from src.pipeline.quality import QualityAssessment
 
 
@@ -180,8 +181,97 @@ async def test_worker_preserves_source_pixels_and_marks_warning_when_contextual_
     assert completed.status == "COMPLETED_WITH_WARNINGS"
     inpainter.inpaint_image.assert_not_called()
     typesetter.typeset_image.assert_not_called()
-    uploaded_bytes = r2.upload_image.await_args.kwargs["image_bytes"]
-    assert uploaded_bytes == image_bytes
+    r2.upload_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_worker_withholds_page_when_ocr_cannot_verify_any_dialogue(test_session):
+    """An empty OCR result is uncertainty, not evidence that a page is text-free."""
+    from src.domains.jobs.repository import JobRepository
+    from src.pipeline.worker import TranslationPipelineWorker
+
+    job = await JobRepository(test_session).create(
+        {"source_url": "https://example.test/source", "status": "PENDING", "progress_percent": 0}
+    )
+    image_bytes = _jpeg_bytes()
+    scraper = AsyncMock()
+    scraper.fetch_chapter_data.return_value = {
+        "series_slug": "ocr-coverage-series",
+        "series_title": "OCR Coverage Series",
+        "chapter_number": "1",
+        "next_chapter_url": None,
+        "prev_chapter_url": None,
+        "pages": [{"index": 1, "image_bytes": image_bytes, "raw_url": "https://example.test/1.jpg"}],
+    }
+    ocr = AsyncMock()
+    ocr.detect_and_extract.return_value = []
+    r2 = AsyncMock()
+    worker = TranslationPipelineWorker(
+        session=test_session,
+        scraper=scraper,
+        ocr=ocr,
+        translator=_RecordingTranslator(),
+        inpainter=MagicMock(),
+        typesetter=MagicMock(),
+        r2_service=r2,
+        quality_gate=_PassThroughQualityGate(),
+        profile={"genre": "neutral"},
+        glossary=(),
+    )
+
+    completed = await worker.process_job(job.id)
+
+    assert completed.status == "COMPLETED_WITH_WARNINGS"
+    r2.upload_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_worker_withholds_page_when_ocr_reports_partial_coverage(test_session):
+    """A detected bubble cannot justify publishing when coverage finds another unresolved region."""
+    from src.domains.jobs.repository import JobRepository
+    from src.pipeline.worker import TranslationPipelineWorker
+
+    job = await JobRepository(test_session).create(
+        {"source_url": "https://example.test/source", "status": "PENDING", "progress_percent": 0}
+    )
+    image_bytes = _jpeg_bytes()
+    scraper = AsyncMock()
+    scraper.fetch_chapter_data.return_value = {
+        "series_slug": "partial-ocr-series",
+        "series_title": "Partial OCR Series",
+        "chapter_number": "1",
+        "next_chapter_url": None,
+        "prev_chapter_url": None,
+        "pages": [{"index": 1, "image_bytes": image_bytes, "raw_url": "https://example.test/1.jpg"}],
+    }
+    ocr = AsyncMock()
+    ocr.detect_and_extract.return_value = OCRExtractionResult(
+        [_segment(1, 1, "Detected bubble")],
+        OCRRunMetrics(
+            recovery_trigger="uncovered_component",
+            recovery_skipped_reason="recovery_concurrency_saturated",
+            coverage_verified=False,
+            uncovered_components=1,
+        ),
+    )
+    r2 = AsyncMock()
+    worker = TranslationPipelineWorker(
+        session=test_session,
+        scraper=scraper,
+        ocr=ocr,
+        translator=_RecordingTranslator(),
+        inpainter=MagicMock(),
+        typesetter=MagicMock(),
+        r2_service=r2,
+        quality_gate=_PassThroughQualityGate(),
+        profile={"genre": "neutral"},
+        glossary=(),
+    )
+
+    completed = await worker.process_job(job.id)
+
+    assert completed.status == "COMPLETED_WITH_WARNINGS"
+    r2.upload_image.assert_not_awaited()
 
 
 @pytest.mark.asyncio

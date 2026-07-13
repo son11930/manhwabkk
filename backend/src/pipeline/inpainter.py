@@ -76,9 +76,21 @@ class InpainterEngine:
     def inpaint_image(self, image_bytes: bytes, boxes: list) -> bytes:
         """
         Takes raw image bytes and list of bounding boxes, cleans text, and returns new image bytes.
+
+        Repeated retries can carry the same approved region twice.  Cleaning an
+        identical box twice is not useful and makes pixel writes non-idempotent,
+        so collapse exact boxes here as a defensive last line of protection.
         """
         img = Image.open(io.BytesIO(image_bytes))
+        seen_boxes = set()
+        unique_boxes = []
         for box in boxes:
+            normalized_box = tuple(int(value) for value in box)
+            if normalized_box in seen_boxes:
+                continue
+            seen_boxes.add(normalized_box)
+            unique_boxes.append(normalized_box)
+        for box in unique_boxes:
             img = self.clean_speech_box(img, box)
         
         output = io.BytesIO()

@@ -1,6 +1,8 @@
 import json
+from io import BytesIO
 
 import pytest
+from PIL import Image
 from unittest.mock import AsyncMock, MagicMock
 from src.pipeline.worker import TranslationPipelineWorker
 from src.pipeline.contracts import TranslationResult
@@ -8,6 +10,14 @@ from src.domains.jobs.models import TranslationJob
 from src.infrastructure.ai.groq_client import CompletionResult
 from src.infrastructure.ai.deepseek_client import DeepSeekClient
 from src.config import settings
+import src.pipeline.worker as worker_module
+
+
+def _jpeg_bytes() -> bytes:
+    image = Image.new("RGB", (200, 200), "white")
+    output = BytesIO()
+    image.save(output, format="JPEG")
+    return output.getvalue()
 
 
 @pytest.mark.asyncio
@@ -33,8 +43,8 @@ async def test_worker_passes_completed_batch_context_to_the_next_batch(monkeypat
         "series_title": "Test Manga",
         "chapter_number": "1",
         "pages": [
-            {"index": 1, "image_bytes": b"img1", "raw_url": "url1"},
-            {"index": 2, "image_bytes": b"img2", "raw_url": "url2"},
+            {"index": 1, "image_bytes": _jpeg_bytes(), "raw_url": "url1"},
+            {"index": 2, "image_bytes": _jpeg_bytes(), "raw_url": "url2"},
         ]
     })
 
@@ -108,7 +118,7 @@ async def test_worker_passes_completed_batch_context_to_the_next_batch(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_worker_recovers_short_english_leakage_before_typesetting():
+async def test_worker_recovers_short_english_leakage_before_typesetting(monkeypatch):
     job = TranslationJob(
         id="job-deepseek-english-leakage",
         source_url="https://example.com/manga/ch1",
@@ -129,7 +139,7 @@ async def test_worker_recovers_short_english_leakage_before_typesetting():
         "series_slug": "test-manga",
         "series_title": "Test Manga",
         "chapter_number": "1",
-        "pages": [{"index": 1, "image_bytes": b"img1", "raw_url": "url1"}],
+        "pages": [{"index": 1, "image_bytes": _jpeg_bytes(), "raw_url": "url1"}],
     })
     ocr = MagicMock()
     ocr.detect_and_extract = AsyncMock(return_value=[
@@ -140,7 +150,13 @@ async def test_worker_recovers_short_english_leakage_before_typesetting():
         side_effect=AssertionError("DeepSeek recovery must not switch providers")
     )
     typesetter = MagicMock()
-    typesetter.typeset_image = MagicMock(return_value=b"typeset")
+    def typeset_after_stage_two(*_args, **_kwargs):
+        # Recovery is part of Stage 2.  Rendering must never trigger an
+        # additional DeepSeek request after this point.
+        assert deepseek_client.generate_chat_completion_result.call_count == 2
+        return b"typeset"
+
+    typesetter.typeset_image = MagicMock(side_effect=typeset_after_stage_two)
     inpainter = MagicMock()
     inpainter.inpaint_image = MagicMock(return_value=b"inpainted")
     storage = MagicMock()
@@ -154,9 +170,27 @@ async def test_worker_recovers_short_english_leakage_before_typesetting():
     profile_repo.find_profile = AsyncMock(return_value={"genre": "modern_cultivation"})
     profile_repo.list_glossary = AsyncMock(return_value=[])
 
+    stage_three_started = False
+    original_info = worker_module.logger.info
+
+    def record_stage(message, *args, **kwargs):
+        nonlocal stage_three_started
+        if "STAGE 3/4" in str(message):
+            stage_three_started = True
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(worker_module.logger, "info", record_stage)
+
     deepseek_client = MagicMock(spec=DeepSeekClient)
     deepseek_client.model = "deepseek-chat"
-    deepseek_client.generate_chat_completion_result.side_effect = [
+    async def deepseek_response(*_args, **_kwargs):
+        # A pre-refactor worker performed the second request in Stage 3.
+        # This makes the pipeline boundary observable instead of only
+        # asserting the final call count.
+        assert not stage_three_started
+        return deepseek_responses.pop(0)
+
+    deepseek_responses = [
         CompletionResult(
             text='{"translations": [{"segment_id": "1:1", "text": "THEM!"}]}',
             model="deepseek-chat",
@@ -174,6 +208,7 @@ async def test_worker_recovers_short_english_leakage_before_typesetting():
             total_tokens=20,
         ),
     ]
+    deepseek_client.generate_chat_completion_result.side_effect = deepseek_response
 
     worker = TranslationPipelineWorker(
         session=MagicMock(),
@@ -197,5 +232,5 @@ async def test_worker_recovers_short_english_leakage_before_typesetting():
     groq_translator.translate_batch.assert_not_awaited()
     assert deepseek_client.generate_chat_completion_result.await_count == 2
     assert typesetter.typeset_image.call_args.args[1] == [
-        {"box": (10, 10, 100, 100), "text": "พวกเขาน่ะ!"}
+        {"region_id": "1:bubble:1", "box": (10, 10, 100, 100), "text": "พวกเขาน่ะ!"}
     ]

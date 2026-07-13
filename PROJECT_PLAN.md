@@ -1043,3 +1043,10 @@ Reduce end-to-end chapter translation latency for **DeepSeek Flash (`deepseek-v4
 - Enforce one active OCR segment, translation result, clean mask, and render instruction per visual bubble; recovery replaces region state rather than appending overlays.
 - Add render collision preflight and bubble-masked glyph inpainting so duplicate Thai overlays and residual English text cannot be published.
 - Preserve separate adjacent bubbles even when their text is identical, and keep all recovery inside the existing CPU/provider budgets.
+
+# Verified OCR and Fail-Closed Publication Status (2026-07-13)
+
+- Implemented bounded ROI OCR metrics/configuration and a local warm-run benchmark command; Stage 1 now records queue and processing percentiles without logging dialogue content.
+- Implemented provider-neutral publication coverage: any unapproved translation, empty OCR result, or unresolved page-coverage audit is retained for review and is never uploaded as an apparently translated source page.
+- DeepSeek recovery remains confined to the selected DeepSeek provider/model in Stage 2. Groq keeps its provider-local recovery behavior.
+- Render instructions now carry stable region identity and are preflighted before inpainting/typesetting so duplicate or unsafe overlapping Thai writes cannot modify a page.

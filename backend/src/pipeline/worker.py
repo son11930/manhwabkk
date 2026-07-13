@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 from dataclasses import replace
@@ -8,6 +9,8 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Optional
 import uuid
 import time
+
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +32,14 @@ from src.pipeline.rendering import (
     associate_shifted_region_candidates,
     build_render_instructions,
     deduplicate_render_instructions,
+    preflight_render_instructions,
 )
 from src.pipeline.translator import AITranslatorEngine, TranslationResponseError
 from src.infrastructure.ai.factory import get_ai_client
 from src.pipeline.deepseek_batch_translator import DeepSeekBatchTranslator, append_batch_context, group_pages_for_batching
 from src.pipeline.typesetter import TypesetterEngine
 from src.config import settings
+from src.pipeline.ocr_benchmark import percentile
 
 
 _SPARE_ME_GREAT_LORD_GLOSSARY = (
@@ -97,10 +102,7 @@ class TranslationPipelineWorker:
         self.profile = dict(profile) if profile else None
         self.glossary = tuple(glossary)
         self.run_id_factory = run_id_factory
-        import os
-        cpu_count = os.cpu_count() or 2
-        max_workers = max(2, min(4, cpu_count // 2))
-        self.cpu_semaphore = asyncio.Semaphore(max_workers)
+        self.cpu_semaphore = asyncio.Semaphore(settings.OCR_BASE_CONCURRENCY)
         self.upload_semaphore = asyncio.Semaphore(10)
         self.db_lock = asyncio.Lock()
 
@@ -257,14 +259,21 @@ class TranslationPipelineWorker:
                 logger.info("[Worker] Job %s cancelled during OCR phase", job_id)
                 return current_job
 
-            async def _extract_page_ocr(page: dict) -> tuple[int, list]:
+            async def _extract_page_ocr(page: dict) -> tuple[int, list, dict[str, float | int | str]]:
                 queued_at = time.perf_counter()
                 async with self.cpu_semaphore:
                     started_at = time.perf_counter()
                     batch = await self.ocr.detect_and_extract(page["image_bytes"], page_index=page["index"])
                 finished_at = time.perf_counter()
+                run_metrics = getattr(batch, "metrics", None)
+                safe_metrics = run_metrics.safe_log_fields() if run_metrics else {}
+                page_metrics: dict[str, float | int | str] = {
+                    "queue_wait_ms": (started_at - queued_at) * 1000,
+                    "process_ms": (finished_at - started_at) * 1000,
+                    **safe_metrics,
+                }
                 logger.info(
-                    "[Worker] [Job %s] OCR Page %d/%d done in %.2fs (queue %.2fs, OCR %.2fs, found %d bubbles)",
+                    "[Worker] [Job %s] OCR Page %d/%d done in %.2fs (queue %.2fs, OCR %.2fs, found %d bubbles, base=%s, roi=%s)",
                     job_id,
                     page["index"],
                     len(pages_data),
@@ -272,8 +281,11 @@ class TranslationPipelineWorker:
                     started_at - queued_at,
                     finished_at - started_at,
                     len(batch),
+                    safe_metrics.get("base_passes", "unknown"),
+                    safe_metrics.get("roi_passes", "unknown"),
+                    extra={"job_id": job_id, "stage": "ocr", "page": page["index"], "event": "ocr_page_complete", **page_metrics},
                 )
-                return page["index"], batch
+                return page["index"], batch, page_metrics
 
             ocr_results = await asyncio.gather(*[_extract_page_ocr(p) for p in pages_data])
             current_job = await self._cancelled_job(job_id)
@@ -283,14 +295,44 @@ class TranslationPipelineWorker:
             for completed_ocr_count, res in enumerate(ocr_results, start=1):
                 ocr_prog = 30 + int((completed_ocr_count / max(1, len(pages_data))) * 15)
                 await self.job_repo.update(job_id, {"progress_percent": ocr_prog})
-            ocr_batches = [batch for _, batch in ocr_results]
+            ocr_batches = [batch for _, batch, _ in ocr_results]
 
             ocr_duration = time.perf_counter() - stage_ocr_start
-            logger.info("[Worker] [Job %s] === STAGE 1/4 DONE in %.2fs (avg %.2fs/page) across %d pages ===", job_id, ocr_duration, ocr_duration / max(1, len(pages_data)), len(pages_data))
+            ocr_page_metrics = [metrics for _, _, metrics in ocr_results]
+            queue_waits = [float(metrics["queue_wait_ms"]) for metrics in ocr_page_metrics]
+            process_times = [float(metrics["process_ms"]) for metrics in ocr_page_metrics]
+            recovery_hits = sum(1 for metrics in ocr_page_metrics if int(metrics.get("roi_passes", 0)) > 0)
+            roi_pixels = sum(int(metrics.get("roi_pixels", 0)) for metrics in ocr_page_metrics)
+            logger.info(
+                "[Worker] [Job %s] === STAGE 1/4 DONE in %.2fs (avg %.2fs/page, queue p50/p95 %.0f/%.0fms, process p50/p95 %.0f/%.0fms, recovery %d/%d, roi_pixels=%d) ===",
+                job_id, ocr_duration, ocr_duration / max(1, len(pages_data)),
+                percentile(queue_waits, 0.5), percentile(queue_waits, 0.95),
+                percentile(process_times, 0.5), percentile(process_times, 0.95),
+                recovery_hits, len(pages_data), roi_pixels,
+                extra={"job_id": job_id, "stage": "ocr", "event": "ocr_stage_complete", "queue_p50_ms": percentile(queue_waits, 0.5), "queue_p95_ms": percentile(queue_waits, 0.95), "process_p50_ms": percentile(process_times, 0.5), "process_p95_ms": percentile(process_times, 0.95), "recovery_hits": recovery_hits, "pages": len(pages_data), "roi_pixels": roi_pixels},
+            )
             segments_by_page = {
                 page["index"]: self._segments_from_ocr(page["index"], batch)
                 for page, batch in zip(pages_data, ocr_batches)
             }
+            # A blank OCR result is not proof that a page has no dialogue.
+            # Treat it as an unverified page so the original English image can
+            # never be uploaded as a seemingly successful translation.
+            metrics_by_page = {
+                page_index: metrics for page_index, _, metrics in ocr_results
+            }
+            unverified_ocr_pages = tuple(
+                page["index"]
+                for page in pages_data
+                if not segments_by_page[page["index"]]
+                or not bool(metrics_by_page[page["index"]].get("coverage_verified", True))
+            )
+            if unverified_ocr_pages:
+                logger.warning(
+                    "[Worker] [Job %s] OCR coverage is unverified on pages %s; withholding publish unless retried",
+                    job_id,
+                    ",".join(str(index) for index in unverified_ocr_pages),
+                )
             profile, glossary = await self._profile_for(series.id, series_slug)
             run_id = self.run_id_factory()
             rolling_context: list[dict[str, str]] = []
@@ -326,6 +368,11 @@ class TranslationPipelineWorker:
                     batch_limit = 1
 
                 stage_ai_start = time.perf_counter()
+                # Tracks every segment that has received an explicit recovery
+                # request.  This is deliberately job-local and bounded to one
+                # recovery request per segment, regardless of partial JSON or
+                # quality-gate failures.
+                deepseek_recovery_ledger: set[str] = set()
                 logger.info(
                     "[Worker] [Job %s] === STAGE 2/4: serial contextual AI Batch Translation started (%d batches across %d pages, provider=%s, configured_provider_cap=%d) ===",
                     job_id, len(batches), len(pages_data), provider, batch_limit
@@ -352,6 +399,9 @@ class TranslationPipelineWorker:
                             logger.warning(
                                 "[Worker] [Job %s] Batch %d/%d preserved %d translations; recovering %d missing IDs only",
                                 job_id, batch_idx, len(batches), len(res.translations), len(missing_segments),
+                            )
+                            deepseek_recovery_ledger.update(
+                                segment.segment_id for segment in missing_segments
                             )
                             try:
                                 recovered = await batch_translator.translate_page_batch(
@@ -406,6 +456,65 @@ class TranslationPipelineWorker:
                     except Exception as apply_err:
                         logger.warning("[Worker] [Job %s] DeepSeek batch result could not be applied: %s", job_id, apply_err)
 
+                # Stage 2 owns the complete DeepSeek recovery lifecycle.  A
+                # page is retried at most once and only with the same
+                # DeepSeekBatchTranslator, so Stage 3 remains CPU/I/O-only and
+                # DeepSeek can never cross to Groq or a different model.
+                for page in pages_data:
+                    page_segments = segments_by_page[page["index"]]
+                    recoverable = [
+                        segment
+                        for segment in page_segments
+                        if segment.segment_id not in deepseek_recovery_ledger
+                        and (
+                            not deepseek_translations.get(segment.segment_id, "").strip()
+                            or deepseek_translations[segment.segment_id].strip() == segment.source_text.strip()
+                            or bool(
+                                _MANDATORY_RECOVERY_ISSUES
+                                & set(
+                                    self.quality_gate.evaluate(
+                                        segment,
+                                        deepseek_translations.get(segment.segment_id, ""),
+                                        glossary,
+                                    ).issue_codes
+                                )
+                            )
+                        )
+                    ]
+                    if not recoverable:
+                        continue
+                    deepseek_recovery_ledger.update(segment.segment_id for segment in recoverable)
+                    logger.info(
+                        "[Worker] [Job %s] Stage 2 recovering %d segments on page %d with the configured DeepSeek model",
+                        job_id,
+                        len(recoverable),
+                        page["index"],
+                    )
+                    try:
+                        recovery = await batch_translator.translate_page_batch(
+                            [recoverable],
+                            glossary=tuple(glossary),
+                            context=tuple(rolling_context[-8:]),
+                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                        )
+                    except Exception as recovery_error:
+                        logger.warning(
+                            "[Worker] [Job %s] Stage 2 DeepSeek recovery failed for page %d (%s); retaining items for review",
+                            job_id,
+                            page["index"],
+                            type(recovery_error).__name__,
+                        )
+                        continue
+                    deepseek_translations.update({
+                        segment_id: text
+                        for segment_id, text in recovery.translations.items()
+                        if text and text.strip()
+                    })
+                    total_in_tokens += recovery.input_tokens
+                    total_out_tokens += recovery.output_tokens
+                    total_cost_usd += recovery.cost_usd
+                    actual_model = recovery.model or actual_model
+
                 ai_duration = time.perf_counter() - stage_ai_start
                 logger.info(
                     "[Worker] [Job %s] === STAGE 2/4 DONE in %.2fs (%d segments translated across %d batches) ===",
@@ -426,6 +535,13 @@ class TranslationPipelineWorker:
                 all_segments.update({segment.segment_id: segment for segment in page_segments})
 
             page_render_jobs: list[tuple[dict, list]] = []
+            # Never render a partially translated page.  This applies to every
+            # provider: an unapproved bubble would otherwise keep its English
+            # source text after the other regions are inpainted.  DeepSeek's
+            # recovery remains strictly provider-local in Stage 2 above.
+            unresolved_segments: list[str] = [
+                f"ocr-unverified:{page_index}" for page_index in unverified_ocr_pages
+            ]
             for page in pages_data:
                 current_job = await self._cancelled_job(job_id)
                 if current_job:
@@ -472,41 +588,6 @@ class TranslationPipelineWorker:
                     final_page_results.extend(batch_results)
 
                 result_map = {res.segment_id: res for res in final_page_results}
-                missing_on_page = [
-                    s for s in page_segments
-                    if s.segment_id not in result_map
-                    or not result_map[s.segment_id].final_thai
-                    or result_map[s.segment_id].final_thai.strip() == s.source_text.strip()
-                    or bool(
-                        _MANDATORY_RECOVERY_ISSUES
-                        & set(self.quality_gate.evaluate(s, result_map[s.segment_id].final_thai, glossary).issue_codes)
-                    )
-                ]
-                if missing_on_page and active_ds_translator is not None:
-                    try:
-                        logger.info("[Worker] [Job %s] Page %d batch recovering %d untranslated segments...", job_id, page["index"], len(missing_on_page))
-                        page_rec_res = await active_ds_translator.translate_page_batch(
-                            [missing_on_page],
-                            glossary=tuple(glossary),
-                            context=tuple(rolling_context[-8:]),
-                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                        )
-                        for s in missing_on_page:
-                            th_val = page_rec_res.translations.get(s.segment_id, "")
-                            if th_val and th_val.strip() != s.source_text.strip():
-                                result_map[s.segment_id] = TranslationResult(
-                                    segment_id=s.segment_id,
-                                    source_text=s.source_text,
-                                    draft_thai=th_val.strip(),
-                                    final_thai=th_val.strip(),
-                                    model=page_rec_res.model or "batch_page_recovery",
-                                    attempts=2,
-                                    qc_status="APPROVED",
-                                    issue_codes=(),
-                                )
-                    except Exception as page_rec_err:
-                        logger.warning("[Worker] [Job %s] Page %d batch recovery failed: %s", job_id, page["index"], page_rec_err)
-
                 final_page_results = []
                 for segment in page_segments:
                     result = result_map.get(segment.segment_id)
@@ -547,30 +628,7 @@ class TranslationPipelineWorker:
                             context=tuple(rolling_context[-6:]),
                         )
                         recovered = None
-                        if active_ds_translator is not None:
-                            try:
-                                recovery_res = await active_ds_translator.translate_page_batch(
-                                    [[segment]],
-                                    glossary=tuple(glossary),
-                                    context=tuple(rolling_context[-6:]),
-                                    genre=str(review_profile.get("genre", "modern_cultivation")),
-                                )
-                                if segment.segment_id in recovery_res.translations:
-                                    total_in_tokens += recovery_res.input_tokens
-                                    total_out_tokens += recovery_res.output_tokens
-                                    recovered = TranslationResult(
-                                        segment_id=segment.segment_id,
-                                        source_text=segment.source_text,
-                                        draft_thai=recovery_res.translations[segment.segment_id],
-                                        final_thai=recovery_res.translations[segment.segment_id],
-                                        model=recovery_res.model,
-                                        attempts=2,
-                                        qc_status="APPROVED",
-                                        issue_codes=(),
-                                    )
-                            except Exception as recovery_err:
-                                logger.warning("[Worker] DeepSeek recovery translation failed for %s: %s", segment.segment_id, recovery_err)
-                        else:
+                        if active_ds_translator is None:
                             import inspect
                             from unittest.mock import AsyncMock
                             func = getattr(self.translator, "translate_batch_structured", None)
@@ -603,19 +661,10 @@ class TranslationPipelineWorker:
                         and active_ds_translator is None
                     ):
                         try:
-                            if active_ds_translator is not None:
-                                em_res = await active_ds_translator.translate_page_batch(
-                                    [[segment]],
-                                    glossary=tuple(glossary),
-                                    context=tuple(rolling_context[-6:]),
-                                    genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                                )
-                                emergency_thai = em_res.translations.get(segment.segment_id, "")
-                            else:
-                                emergency_thai = await self.translator.translate_text(
-                                    segment.source_text,
-                                    genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
-                                )
+                            emergency_thai = await self.translator.translate_text(
+                                segment.source_text,
+                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                            )
                             if emergency_thai and emergency_thai.strip() != segment.source_text.strip():
                                 result = TranslationResult(
                                     segment_id=result.segment_id,
@@ -656,6 +705,7 @@ class TranslationPipelineWorker:
                         })
                     else:
                         page_warnings = True
+                        unresolved_segments.append(segment.segment_id)
                         result = TranslationResult(
                             segment_id=result.segment_id,
                             source_text=result.source_text,
@@ -689,16 +739,55 @@ class TranslationPipelineWorker:
                         len(approved) - len(render_instructions),
                     )
                 approved = [
-                    {"box": instruction.box, "text": instruction.text}
+                    {
+                        "region_id": instruction.region_id,
+                        "box": instruction.box,
+                        "text": instruction.text,
+                    }
                     for instruction in render_instructions
                 ]
                 page_render_jobs.append((page, approved))
+
+            if unresolved_segments:
+                # Fail closed: publishing the original page would expose the
+                # English text of an unresolved bubble. Keep auditable
+                # artifacts, but do not render, upload, or replace chapter
+                # pages. When DeepSeek is selected, its retry stays on that
+                # exact provider/model and never falls back to Groq.
+                await self._record_artifacts(run_id, job_id, chapter.id, all_results, all_segments)
+                unresolved_count = len(unresolved_segments)
+                logger.error(
+                    "[Worker] [Job %s] withholding publish: %d dialogue segments remain unresolved",
+                    job_id,
+                    unresolved_count,
+                )
+                return await self.job_repo.update(job_id, {
+                    "status": "COMPLETED_WITH_WARNINGS",
+                    "progress_percent": 100,
+                    "error_message": f"{unresolved_count} dialogue regions need review; no untranslated page was published",
+                    "input_tokens": total_in_tokens,
+                    "output_tokens": total_out_tokens,
+                    "cost_estimate_usd": total_cost_usd,
+                    "actual_model": actual_model or None,
+                })
 
             async def _render_page(page_dict: dict, approved_list: list):
                 page_start = time.perf_counter()
                 raw_bytes = page_dict["image_bytes"]
                 render_start = time.perf_counter()
                 if approved_list:
+                    render_instructions = tuple(
+                        RenderInstruction(
+                            region_id=str(item["region_id"]),
+                            box=tuple(item["box"]),
+                            text=str(item["text"]),
+                        )
+                        for item in approved_list
+                    )
+                    preflight_render_instructions(
+                        render_instructions,
+                        image_size=Image.open(io.BytesIO(raw_bytes)).size,
+                    )
                     async with self.cpu_semaphore:
                         clean_bytes = await asyncio.to_thread(
                             self.inpainter.inpaint_image, raw_bytes, [item["box"] for item in approved_list]

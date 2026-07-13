@@ -3,6 +3,8 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import os
 
+from src.pipeline.rendering import RenderInstruction, preflight_render_instructions
+
 class TypesetterEngine:
     """
     Typesetter Engine for rendering translated Thai text into speech bubble boxes.
@@ -250,11 +252,27 @@ class TypesetterEngine:
 
     def typeset_image(self, image_bytes: bytes, translations: list) -> bytes:
         """
-        Applies a list of translations [{'box': (l,t,r,b), 'text': 'thai text'}] to image bytes.
+        Applies one preflighted translation per visual bubble to image bytes.
+
+        ``region_id`` is mandatory for new callers.  The coordinate fallback is
+        retained for previously staged jobs, but still makes an exact duplicate
+        box fail closed instead of drawing the same bubble twice.
         """
         img = Image.open(io.BytesIO(image_bytes))
-        for item in translations:
-            img = self.render_text_in_box(img, item["text"], item["box"])
+        instructions = tuple(
+            RenderInstruction(
+                region_id=str(item.get("region_id") or f"legacy:{tuple(item['box'])}"),
+                box=tuple(item["box"]),
+                text=str(item["text"]),
+            )
+            for item in translations
+        )
+        preflighted = preflight_render_instructions(
+            instructions,
+            image_size=(img.width, img.height),
+        )
+        for instruction in preflighted:
+            img = self.render_text_in_box(img, instruction.text, instruction.box)
             
         output = io.BytesIO()
         img.save(output, format="JPEG", quality=95)

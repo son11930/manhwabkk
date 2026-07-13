@@ -64,12 +64,17 @@ def test_configure_logging_writes_rotating_json_lines_and_keeps_console(tmp_path
 
     try:
         configure_logging(_settings_for_log_file(log_file))
-        logging.getLogger("pipeline.worker").info("OCR page complete", extra={"job_id": "job-123"})
+        logging.getLogger("pipeline.worker").info(
+            "OCR page complete",
+            extra={"job_id": "job-123", "roi_passes": 2, "roi_pixels": 2400},
+        )
         for handler in root_logger.handlers:
             handler.flush()
 
         payload = json.loads(log_file.read_text(encoding="utf-8").strip())
         assert payload["event"] == "OCR page complete"
+        assert payload["roi_passes"] == 2
+        assert payload["roi_pixels"] == 2400
         assert payload["job_id"] == "job-123"
         assert payload["logger"] == "pipeline.worker"
         assert any(isinstance(handler, logging.StreamHandler) for handler in root_logger.handlers)

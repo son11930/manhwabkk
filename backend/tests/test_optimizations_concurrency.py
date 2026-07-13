@@ -18,6 +18,16 @@ async def test_worker_has_bounded_concurrency_semaphore():
 
 
 @pytest.mark.asyncio
+async def test_worker_uses_configured_base_ocr_concurrency(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "OCR_BASE_CONCURRENCY", 2)
+    worker = TranslationPipelineWorker(AsyncMock())
+
+    assert worker.cpu_semaphore._value == 2
+
+
+@pytest.mark.asyncio
 async def test_worker_ocr_bounded_execution():
     """Verify that detect_and_extract calls are throttled through cpu_semaphore."""
     session = AsyncMock()

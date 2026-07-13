@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     DEEPSEEK_TIMEOUT_SECONDS: int = Field(default=90)
     DEEPSEEK_MAX_RETRIES: int = Field(default=2)
 
+    # OCR work is intentionally bounded: detected pages use one base pass and
+    # only a small number of crop recoveries.  These values are independent
+    # from AI-provider concurrency.
+    OCR_BASE_CONCURRENCY: int = Field(default=4, ge=1, le=8)
+    OCR_RECOVERY_CONCURRENCY: int = Field(default=1, ge=1, le=4)
+    OCR_RECOVERY_MAX_ROIS: int = Field(default=3, ge=0, le=8)
+    OCR_RECOVERY_MAX_PIXEL_RATIO: float = Field(default=2.0, ge=0.0, le=4.0)
+    OCR_RECOVERY_ENABLED: bool = Field(default=True)
+
     # Operational logging. The JSON file contains only safe metadata and is rotated.
     LOG_LEVEL: str = Field(default="INFO")
     LOG_FILE_ENABLED: bool = Field(default=True)

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Fixed
+- Made publication fail closed for every provider: a page with an unapproved translation, empty OCR result, or unresolved OCR coverage audit is withheld instead of publishing a source image with English still visible.
+- Moved render preflight ahead of all inpainting writes, carrying stable region IDs through typesetting and rejecting duplicate, out-of-bounds, or near-identical overlapping writes before pixels change.
+- Added bounded OCR workload settings, redacted per-page timing/pixel metrics, and a repeatable local warm-run benchmark utility; recovery saturation now skips optional ROI work instead of delaying base OCR.
 - Replaced detected-page full-image affine OCR retries with bounded bubble crops, added queue-versus-compute OCR timings, and added regression fixtures for stylized comic text.
 - Added source-text normalization and bounded crop-line admission so malformed italic OCR cannot merge adjacent speech bubbles; the supplied fixtures now preserve the intended `LU SHU`, `IS HE`, `THIRTY-FIVE`, and `STONES!` source text.
 - Consolidated DeepSeek mandatory recovery into its page batch and retain unresolved dialogue for review rather than issuing serial Stage 3 calls or crossing into another provider/model.
