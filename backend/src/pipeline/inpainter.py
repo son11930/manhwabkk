@@ -18,9 +18,13 @@ class InpainterEngine:
         """
         img_copy = image.copy()
         draw = ImageDraw.Draw(img_copy)
-        x1, y1, x2, y2 = box
-        # Expand outward by 3px to completely cover old text and any dark anti-aliased smudges
-        clean_box = (max(0, int(x1) - 3), max(0, int(y1) - 3), min(image.width - 1, int(x2) + 3), min(image.height - 1, int(y2) + 3))
+        # Expand outward to completely cover old text and any stylized lines below the title line
+        clean_box = (
+            max(0, int(x1) - 6),
+            max(0, int(y1) - 6),
+            min(image.width - 1, int(x2) + 6),
+            min(image.height - 1, int(y2) + max(10, int((int(y2) - int(y1)) * 0.20))),
+        )
         
         # Sample 5 points (corners and center) to accurately detect if this is a standard white manga speech bubble
         try:

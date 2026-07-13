@@ -201,6 +201,27 @@ class MangaOCREngine:
             for point in polygon
         )
 
+    _CREDIT_WATERMARK_PATTERNS = (
+        r"本章节仅限",
+        r"腾讯动漫",
+        r"手机APP",
+        r"道元新生群",
+        r"加群",
+        r"群[：:]\s*\d{6,}",
+        r"MASK3钻头",
+        r"^皖[A-Z][·.]\d{2,}[A-Z][·.]",
+    )
+
+    @classmethod
+    def is_noise_credit_or_watermark(cls, text: str) -> bool:
+        """Return True if the text is a known platform watermark, scanlation recruitment credit, or serial ID."""
+        if not text:
+            return False
+        for pattern in cls._CREDIT_WATERMARK_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
+
     @staticmethod
     def _deskew_roi(image: np.ndarray, polygon: tuple | list) -> np.ndarray | None:
         points = MangaOCREngine._ordered_quad(polygon)
@@ -553,6 +574,10 @@ class MangaOCREngine:
                 return OCRExtractionResult(metrics=metrics)
 
             grouped = candidate_groups if lines and needs_recovery else self._group_lines(lines, original_width, original_height)
+            grouped = [
+                item for item in grouped
+                if not self.is_noise_credit_or_watermark(" ".join(item.get("raw_lines", [])))
+            ]
             normalized_sources = [self._normalize_ocr_reading(" ".join(item["raw_lines"])) for item in grouped]
             entity_match = next((re.search(r"\b(LU SHU)(?:'S)?\b", text, re.I) for text in normalized_sources if re.search(r"\bLU SHU(?:'S)?\b", text, re.I)), None)
             canonical_entity = entity_match.group(1).upper() if entity_match else ""
