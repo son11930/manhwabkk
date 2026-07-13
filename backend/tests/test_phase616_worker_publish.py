@@ -178,7 +178,7 @@ async def test_worker_preserves_source_pixels_and_marks_warning_when_contextual_
 
     completed = await worker.process_job(job.id)
 
-    assert completed.status == "COMPLETED_WITH_WARNINGS"
+    assert completed.status == "FAILED"
     inpainter.inpaint_image.assert_not_called()
     typesetter.typeset_image.assert_not_called()
     r2.upload_image.assert_not_awaited()
@@ -221,7 +221,7 @@ async def test_worker_withholds_page_when_ocr_cannot_verify_any_dialogue(test_se
 
     completed = await worker.process_job(job.id)
 
-    assert completed.status == "COMPLETED_WITH_WARNINGS"
+    assert completed.status == "FAILED"
     r2.upload_image.assert_not_awaited()
 
 
@@ -270,7 +270,7 @@ async def test_worker_withholds_page_when_ocr_reports_partial_coverage(test_sess
 
     completed = await worker.process_job(job.id)
 
-    assert completed.status == "COMPLETED_WITH_WARNINGS"
+    assert completed.status == "FAILED"
     r2.upload_image.assert_not_awaited()
 
 

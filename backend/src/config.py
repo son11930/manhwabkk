@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     DEEPSEEK_MAX_BATCH_INPUT_CHARS: int = Field(default=120000)
     DEEPSEEK_TIMEOUT_SECONDS: int = Field(default=90)
     DEEPSEEK_MAX_RETRIES: int = Field(default=2)
+    # Semantic recovery is deliberately bounded so an incomplete response never
+    # becomes an unbounded paid API loop. Only unresolved segment IDs are sent.
+    DEEPSEEK_RECOVERY_RETRY_ROUNDS: int = Field(default=2, ge=0, le=8)
+    DEEPSEEK_RECOVERY_MAX_SEGMENTS_PER_CALL: int = Field(default=8, ge=1, le=32)
+    DEEPSEEK_RECOVERY_MAX_CALLS: int = Field(default=24, ge=1, le=100)
+    DEEPSEEK_RECOVERY_MAX_COST_USD: float = Field(default=0.50, ge=0.0, le=50.0)
+    DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS: int = Field(default=800, ge=64, le=3000)
+    DEEPSEEK_RECOVERY_RETRY_BACKOFF_SECONDS: float = Field(default=1.0, ge=0.0, le=30.0)
 
     # OCR work is intentionally bounded: detected pages use one base pass and
     # only a small number of crop recoveries.  These values are independent

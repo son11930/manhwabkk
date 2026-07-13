@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## [Unreleased]
 
 ### Fixed
+- Added a bounded DeepSeek approval retry queue: only unresolved bubble IDs are retried with the selected DeepSeek model, while approved dialogue is never sent or billed again. Every non-primary recovery shares a request-count and conservatively reserved cost budget; exhausted budgets fail the job without publishing a partial chapter.
 - Made publication fail closed for every provider: a page with an unapproved translation, empty OCR result, or unresolved OCR coverage audit is withheld instead of publishing a source image with English still visible.
 - Moved render preflight ahead of all inpainting writes, carrying stable region IDs through typesetting and rejecting duplicate, out-of-bounds, or near-identical overlapping writes before pixels change.
 - Added bounded OCR workload settings, redacted per-page timing/pixel metrics, and a repeatable local warm-run benchmark utility; recovery saturation now skips optional ROI work instead of delaying base OCR.

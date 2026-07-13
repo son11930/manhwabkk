@@ -169,16 +169,15 @@ class DeepSeekBatchTranslator:
         self.client = client
         self.provider = provider
 
-    async def translate_page_batch(
-        self, pages: List[List[OCRSegment]], glossary: Tuple[Dict[str, Any], ...] = (),
-        context: Tuple[Dict[str, Any], ...] = (), genre: str = "modern_cultivation",
-    ) -> BatchTranslationResult:
+    def _request_body(
+        self,
+        pages: List[List[OCRSegment]],
+        glossary: Tuple[Dict[str, Any], ...],
+        context: Tuple[Dict[str, Any], ...],
+        genre: str,
+    ) -> tuple[list[OCRSegment], dict[str, Any]]:
         segments = [segment for page in pages for segment in page]
-        expected_ids = tuple(segment.segment_id for segment in segments)
-        if not expected_ids:
-            return BatchTranslationResult({}, getattr(self.client, "model", "deepseek-chat"), 1, 0, 0, 0.0)
-
-        body = {
+        return segments, {
             "task": "Translate ordered segments as one continuous Thai manga scene. Return JSON only.",
             "response_schema": {"translations": [{"id": "string", "th": "string"}]},
             "genre": genre,
@@ -191,13 +190,36 @@ class DeepSeekBatchTranslator:
             "glossary": [dict(item) for item in glossary],
             "context": [dict(item) for item in context[-8:]],
         }
+
+    def estimate_max_cost_usd(
+        self, pages: List[List[OCRSegment]], glossary: Tuple[Dict[str, Any], ...] = (),
+        context: Tuple[Dict[str, Any], ...] = (), genre: str = "modern_cultivation",
+        max_output_tokens: int = 3000,
+    ) -> float:
+        """Conservative request ceiling using UTF-8 bytes as an input-token bound."""
+        _, body = self._request_body(pages, glossary, context, genre)
+        system_message = VETERAN_TRANSLATOR_SYSTEM_PROMPT + "\nReturn JSON only; preserve every source clause, glossary term, and identity."
+        input_byte_bound = len(system_message.encode("utf-8")) + len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+        return calculate_deepseek_cost_usd(self.provider, input_byte_bound, max_output_tokens)
+
+    async def translate_page_batch(
+        self, pages: List[List[OCRSegment]], glossary: Tuple[Dict[str, Any], ...] = (),
+        context: Tuple[Dict[str, Any], ...] = (), genre: str = "modern_cultivation",
+        max_output_tokens: int = 3000,
+    ) -> BatchTranslationResult:
+        if max_output_tokens < 1:
+            raise ValueError("max_output_tokens must be positive")
+        segments, body = self._request_body(pages, glossary, context, genre)
+        expected_ids = tuple(segment.segment_id for segment in segments)
+        if not expected_ids:
+            return BatchTranslationResult({}, getattr(self.client, "model", "deepseek-chat"), 1, 0, 0, 0.0)
         result = await self.client.generate_chat_completion_result(
             messages=[
                 {"role": "system", "content": VETERAN_TRANSLATOR_SYSTEM_PROMPT + "\nReturn JSON only; preserve every source clause, glossary term, and identity."},
                 {"role": "user", "content": json.dumps(body, ensure_ascii=False)},
             ],
             temperature=0.15,
-            max_tokens=3000,
+            max_tokens=max_output_tokens,
         )
         parse_outcome = parse_deepseek_batch_response(result.text, expected_ids)
         if not parse_outcome.translations:

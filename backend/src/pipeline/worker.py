@@ -345,8 +345,11 @@ class TranslationPipelineWorker:
             total_in_tokens = 0
             total_out_tokens = 0
             total_cost_usd = 0.0
+            deepseek_recovery_cost_usd = 0.0
+            deepseek_recovery_calls = 0
             actual_model = ""
             active_ds_translator: Optional[DeepSeekBatchTranslator] = None
+            retry_budget_exhausted_reason = ""
 
             if provider in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
                 client = ai_client or get_ai_client(provider)
@@ -368,17 +371,39 @@ class TranslationPipelineWorker:
                     batch_limit = 1
 
                 stage_ai_start = time.perf_counter()
-                # Tracks every segment that has received an explicit recovery
-                # request.  This is deliberately job-local and bounded to one
-                # recovery request per segment, regardless of partial JSON or
-                # quality-gate failures.
+                # Avoid duplicate bootstrap recovery for an ID that was
+                # already retried as a missing response. Later queue rounds
+                # may still retry it, subject to the shared cost budget.
                 deepseek_recovery_ledger: set[str] = set()
+
+                def reserve_recovery_call(upper_cost_usd: float) -> bool:
+                    nonlocal deepseek_recovery_calls, deepseek_recovery_cost_usd, retry_budget_exhausted_reason
+                    if deepseek_recovery_calls >= settings.DEEPSEEK_RECOVERY_MAX_CALLS:
+                        retry_budget_exhausted_reason = "recovery_call_budget_exhausted"
+                        return False
+                    if (
+                        deepseek_recovery_cost_usd + upper_cost_usd
+                        > settings.DEEPSEEK_RECOVERY_MAX_COST_USD
+                    ):
+                        retry_budget_exhausted_reason = "recovery_cost_budget_exhausted"
+                        return False
+                    deepseek_recovery_calls += 1
+                    # Keep this reservation if the request errors: an API can
+                    # fail after accepting a billable request. Successful calls
+                    # settle back to their measured cost below.
+                    deepseek_recovery_cost_usd += upper_cost_usd
+                    return True
+
+                def settle_recovery_call(upper_cost_usd: float, actual_cost_usd: float) -> None:
+                    nonlocal deepseek_recovery_cost_usd
+                    deepseek_recovery_cost_usd += actual_cost_usd - upper_cost_usd
                 logger.info(
                     "[Worker] [Job %s] === STAGE 2/4: serial contextual AI Batch Translation started (%d batches across %d pages, provider=%s, configured_provider_cap=%d) ===",
                     job_id, len(batches), len(pages_data), provider, batch_limit
                 )
 
                 async def translate_deepseek_batch(batch_idx: int, page_batch, context):
+                    nonlocal deepseek_recovery_cost_usd
                     batch_start = time.perf_counter()
                     try:
                         res = await batch_translator.translate_page_batch(
@@ -403,12 +428,26 @@ class TranslationPipelineWorker:
                             deepseek_recovery_ledger.update(
                                 segment.segment_id for segment in missing_segments
                             )
+                            recovery_ceiling = batch_translator.estimate_max_cost_usd(
+                                [missing_segments],
+                                glossary=tuple(glossary),
+                                context=context,
+                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                                max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
+                            )
+                            if not reserve_recovery_call(recovery_ceiling):
+                                logger.warning(
+                                    "[Worker] [Job %s] Batch %d/%d missing-only recovery deferred by budget",
+                                    job_id, batch_idx, len(batches),
+                                )
+                                return res
                             try:
                                 recovered = await batch_translator.translate_page_batch(
                                     [missing_segments],
                                     glossary=tuple(glossary),
                                     context=context,
                                     genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                                    max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
                                 )
                                 res = replace(
                                     res,
@@ -417,6 +456,7 @@ class TranslationPipelineWorker:
                                     output_tokens=res.output_tokens + recovered.output_tokens,
                                     cost_usd=res.cost_usd + recovered.cost_usd,
                                 )
+                                settle_recovery_call(recovery_ceiling, recovered.cost_usd)
                             except Exception as recovery_error:
                                 logger.warning(
                                     "[Worker] [Job %s] Batch %d/%d missing-only recovery failed (%s); retaining valid partial translations",
@@ -490,30 +530,117 @@ class TranslationPipelineWorker:
                         len(recoverable),
                         page["index"],
                     )
-                    try:
-                        recovery = await batch_translator.translate_page_batch(
-                            [recoverable],
+                    for offset in range(0, len(recoverable), settings.DEEPSEEK_RECOVERY_MAX_SEGMENTS_PER_CALL):
+                        recovery_chunk = recoverable[offset:offset + settings.DEEPSEEK_RECOVERY_MAX_SEGMENTS_PER_CALL]
+                        recovery_ceiling = batch_translator.estimate_max_cost_usd(
+                            [recovery_chunk],
                             glossary=tuple(glossary),
                             context=tuple(rolling_context[-8:]),
                             genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                            max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
                         )
-                    except Exception as recovery_error:
-                        logger.warning(
-                            "[Worker] [Job %s] Stage 2 DeepSeek recovery failed for page %d (%s); retaining items for review",
-                            job_id,
-                            page["index"],
-                            type(recovery_error).__name__,
+                        if not reserve_recovery_call(recovery_ceiling):
+                            logger.warning(
+                                "[Worker] [Job %s] Stage 2 recovery for page %d deferred by budget",
+                                job_id,
+                                page["index"],
+                            )
+                            break
+                        try:
+                            recovery = await batch_translator.translate_page_batch(
+                                [recovery_chunk],
+                                glossary=tuple(glossary),
+                                context=tuple(rolling_context[-8:]),
+                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                                max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
+                            )
+                        except Exception as recovery_error:
+                            logger.warning(
+                                "[Worker] [Job %s] Stage 2 DeepSeek recovery failed for page %d (%s); retaining items for review",
+                                job_id,
+                                page["index"],
+                                type(recovery_error).__name__,
+                            )
+                            continue
+                        deepseek_translations.update({
+                            segment_id: text
+                            for segment_id, text in recovery.translations.items()
+                            if text and text.strip()
+                        })
+                        total_in_tokens += recovery.input_tokens
+                        total_out_tokens += recovery.output_tokens
+                        total_cost_usd += recovery.cost_usd
+                        settle_recovery_call(recovery_ceiling, recovery.cost_usd)
+                        actual_model = recovery.model or actual_model
+
+                # A job is complete only when every detected region passes
+                # quality checks. Retry the unresolved IDs only, in small
+                # provider-local calls, so approved dialogue is never billed
+                # again and DeepSeek never crosses to Groq.
+                def needs_deepseek_retry(segment: OCRSegment) -> bool:
+                    candidate = deepseek_translations.get(segment.segment_id, "").strip()
+                    if not candidate or candidate == segment.source_text.strip():
+                        return True
+                    return not self.quality_gate.evaluate(segment, candidate, glossary).passed
+
+                for retry_round in range(settings.DEEPSEEK_RECOVERY_RETRY_ROUNDS):
+                    pending = tuple(
+                        segment
+                        for page in pages_data
+                        for segment in segments_by_page[page["index"]]
+                        if needs_deepseek_retry(segment)
+                    )
+                    if not pending:
+                        break
+                    delay = settings.DEEPSEEK_RECOVERY_RETRY_BACKOFF_SECONDS * (2 ** retry_round)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    logger.info(
+                        "[Worker] [Job %s] DeepSeek recovery round %d/%d retrying %d unresolved regions",
+                        job_id,
+                        retry_round + 1,
+                        settings.DEEPSEEK_RECOVERY_RETRY_ROUNDS,
+                        len(pending),
+                    )
+                    for offset in range(0, len(pending), settings.DEEPSEEK_RECOVERY_MAX_SEGMENTS_PER_CALL):
+                        retry_chunk = list(pending[offset:offset + settings.DEEPSEEK_RECOVERY_MAX_SEGMENTS_PER_CALL])
+                        retry_ceiling = batch_translator.estimate_max_cost_usd(
+                            [retry_chunk],
+                            glossary=tuple(glossary),
+                            context=tuple(rolling_context[-8:]),
+                            genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                            max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
                         )
-                        continue
-                    deepseek_translations.update({
-                        segment_id: text
-                        for segment_id, text in recovery.translations.items()
-                        if text and text.strip()
-                    })
-                    total_in_tokens += recovery.input_tokens
-                    total_out_tokens += recovery.output_tokens
-                    total_cost_usd += recovery.cost_usd
-                    actual_model = recovery.model or actual_model
+                        if not reserve_recovery_call(retry_ceiling):
+                            break
+                        try:
+                            retry_result = await batch_translator.translate_page_batch(
+                                [retry_chunk],
+                                glossary=tuple(glossary),
+                                context=tuple(rolling_context[-8:]),
+                                genre=str(profile.get("genre", "modern_cultivation")) if isinstance(profile, dict) else "modern_cultivation",
+                                max_output_tokens=settings.DEEPSEEK_RECOVERY_MAX_OUTPUT_TOKENS,
+                            )
+                        except Exception as retry_error:
+                            logger.warning(
+                                "[Worker] [Job %s] DeepSeek recovery round %d request failed (%s)",
+                                job_id,
+                                retry_round + 1,
+                                type(retry_error).__name__,
+                            )
+                            continue
+                        deepseek_translations.update({
+                            segment_id: text
+                            for segment_id, text in retry_result.translations.items()
+                            if text and text.strip()
+                        })
+                        total_in_tokens += retry_result.input_tokens
+                        total_out_tokens += retry_result.output_tokens
+                        total_cost_usd += retry_result.cost_usd
+                        settle_recovery_call(retry_ceiling, retry_result.cost_usd)
+                        actual_model = retry_result.model or actual_model
+                    if retry_budget_exhausted_reason:
+                        break
 
                 ai_duration = time.perf_counter() - stage_ai_start
                 logger.info(
@@ -762,9 +889,13 @@ class TranslationPipelineWorker:
                     unresolved_count,
                 )
                 return await self.job_repo.update(job_id, {
-                    "status": "COMPLETED_WITH_WARNINGS",
+                    "status": "FAILED",
                     "progress_percent": 100,
-                    "error_message": f"{unresolved_count} dialogue regions need review; no untranslated page was published",
+                    "error_message": (
+                        f"{unresolved_count} dialogue regions remain unresolved "
+                        f"({retry_budget_exhausted_reason or 'approval_retry_budget_exhausted'}); "
+                        "no untranslated page was published"
+                    ),
                     "input_tokens": total_in_tokens,
                     "output_tokens": total_out_tokens,
                     "cost_estimate_usd": total_cost_usd,

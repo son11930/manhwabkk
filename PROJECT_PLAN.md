@@ -1050,3 +1050,11 @@ Reduce end-to-end chapter translation latency for **DeepSeek Flash (`deepseek-v4
 - Implemented provider-neutral publication coverage: any unapproved translation, empty OCR result, or unresolved page-coverage audit is retained for review and is never uploaded as an apparently translated source page.
 - DeepSeek recovery remains confined to the selected DeepSeek provider/model in Stage 2. Groq keeps its provider-local recovery behavior.
 - Render instructions now carry stable region identity and are preflighted before inpainting/typesetting so duplicate or unsafe overlapping Thai writes cannot modify a page.
+
+# Complete-or-Fail Translation Retry Queue (2026-07-13)
+
+- Replace terminal `NEEDS_REVIEW` publication warnings with a bounded, provider-local retry queue: only unresolved bubble IDs are retried and a job publishes only after every detected, coverage-verified bubble is approved.
+- DeepSeek retries must always use the configured DeepSeek model and preserve recent approved dialogue context. Groq may keep its own configured recovery policy but may never be used as a DeepSeek fallback.
+- Cost controls are explicit configuration: maximum retry rounds, request count, request-cost reservation, maximum segments per recovery request, and bounded retry backoff. Every non-primary DeepSeek recovery reserves the same shared job budget; already approved bubbles are never resent.
+- After the configured retry budget is exhausted, mark the job `FAILED` with auditable unresolved IDs and no page upload/replacement. This is a deliberate operational failure, never a partial success.
+- Add regression coverage for recovery success, exhausted retry budget, provider isolation, no duplicate requests for approved IDs, and no publish before complete approval.

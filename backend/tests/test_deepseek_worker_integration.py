@@ -6,6 +6,7 @@ from PIL import Image
 from unittest.mock import AsyncMock, MagicMock
 from src.pipeline.worker import TranslationPipelineWorker
 from src.pipeline.contracts import TranslationResult
+from src.pipeline.quality import QualityAssessment
 from src.domains.jobs.models import TranslationJob
 from src.infrastructure.ai.groq_client import CompletionResult
 from src.infrastructure.ai.deepseek_client import DeepSeekClient
@@ -99,6 +100,9 @@ async def test_worker_passes_completed_batch_context_to_the_next_batch(monkeypat
         inpainter=inpainter,
         typesetter=typesetter,
     )
+    worker.quality_gate.evaluate = MagicMock(
+        return_value=QualityAssessment(passed=True, issue_codes=(), requires_semantic_review=False)
+    )
     worker.job_repo = job_repo
     worker.series_repo = series_repo
     worker.chapter_repo = chapter_repo
@@ -118,7 +122,8 @@ async def test_worker_passes_completed_batch_context_to_the_next_batch(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_worker_recovers_short_english_leakage_before_typesetting(monkeypatch):
+async def test_worker_retries_unresolved_deepseek_bubble_until_approved_before_typesetting(monkeypatch):
+    monkeypatch.setattr(settings, "DEEPSEEK_RECOVERY_RETRY_ROUNDS", 1, raising=False)
     job = TranslationJob(
         id="job-deepseek-english-leakage",
         source_url="https://example.com/manga/ch1",
@@ -153,7 +158,7 @@ async def test_worker_recovers_short_english_leakage_before_typesetting(monkeypa
     def typeset_after_stage_two(*_args, **_kwargs):
         # Recovery is part of Stage 2.  Rendering must never trigger an
         # additional DeepSeek request after this point.
-        assert deepseek_client.generate_chat_completion_result.call_count == 2
+        assert deepseek_client.generate_chat_completion_result.call_count == 3
         return b"typeset"
 
     typesetter.typeset_image = MagicMock(side_effect=typeset_after_stage_two)
@@ -200,6 +205,14 @@ async def test_worker_recovers_short_english_leakage_before_typesetting(monkeypa
             total_tokens=20,
         ),
         CompletionResult(
+            text='{"translations": [{"segment_id": "1:1", "text": "THEM!"}]}',
+            model="deepseek-chat",
+            attempts=1,
+            prompt_tokens=10,
+            completion_tokens=10,
+            total_tokens=20,
+        ),
+        CompletionResult(
             text='{"translations": [{"segment_id": "1:1", "text": "พวกเขาน่ะ!"}]}',
             model="deepseek-chat",
             attempts=1,
@@ -230,7 +243,7 @@ async def test_worker_recovers_short_english_leakage_before_typesetting(monkeypa
 
     assert completed.status == "COMPLETED"
     groq_translator.translate_batch.assert_not_awaited()
-    assert deepseek_client.generate_chat_completion_result.await_count == 2
+    assert deepseek_client.generate_chat_completion_result.await_count == 3
     assert typesetter.typeset_image.call_args.args[1] == [
         {"region_id": "1:bubble:1", "box": (10, 10, 100, 100), "text": "พวกเขาน่ะ!"}
     ]
